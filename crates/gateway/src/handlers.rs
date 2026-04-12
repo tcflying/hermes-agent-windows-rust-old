@@ -12,7 +12,7 @@ use hermes_config::{ConfigLoader, ConfigUpdate};
 use hermes_session::{SessionDb, SessionInfo, SessionMessage};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use std::path::PathBuf;
 use std::fs;
@@ -22,8 +22,8 @@ const DEFAULT_API_URL: &str = "https://api.minimaxi.com/v1";
 
 #[derive(Clone)]
 pub struct AppState {
-    pub session_db: Arc<Mutex<SessionDb>>,
-    pub config: Arc<Mutex<ConfigLoader>>,
+    pub session_db: Arc<RwLock<SessionDb>>,
+    pub config: Arc<RwLock<ConfigLoader>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,6 +76,15 @@ pub fn create_router(state: AppState) -> Router {
 }
 
 pub async fn start_server(port: u16) -> Result<()> {
+    print!("\x1b[33m╔══════════════════════════════════════╗\x1b[0m\n");
+    print!("\x1b[33m║     Hermes Agent Gateway v0.1.0      ║\x1b[0m\n");
+    print!("\x1b[33m╚══════════════════════════════════════╝\x1b[0m\n");
+    print!("\x1b[36m  Listening on http://0.0.0.0:{}\x1b[0m\n", port);
+    print!("\x1b[36m  Endpoints: /health /api/chat /api/chat/stream\x1b[0m\n");
+    print!("\x1b[36m  Sessions:  /api/sessions /api/sessions/{{id}}\x1b[0m\n");
+    print!("\x1b[36m  Tools:     /api/terminal /api/files/* /api/tools\x1b[0m\n");
+    print!("\n");
+
     let db_path = std::env::var("HERMES_DB")
         .map(|p| std::path::PathBuf::from(p))
         .unwrap_or_else(|_| {
@@ -87,6 +96,7 @@ pub async fn start_server(port: u16) -> Result<()> {
 
     let session_db = SessionDb::new(db_path)
         .map_err(|e| anyhow::anyhow!("Failed to open session DB: {}", e))?;
+    print!("\x1b[32m  ✓ Session DB loaded\x1b[0m\n");
 
     let config_path = std::env::var("HERMES_CONFIG")
         .map(|p| std::path::PathBuf::from(p))
@@ -99,19 +109,27 @@ pub async fn start_server(port: u16) -> Result<()> {
 
     let mut config_loader = ConfigLoader::new();
     if let Err(e) = config_loader.load(config_path) {
-        eprintln!("Warning: Failed to load config: {}", e);
+        print!("\x1b[33m  ⚠ Config not loaded: {}\x1b[0m\n", e);
+    } else {
+        print!("\x1b[32m  ✓ Config loaded\x1b[0m\n");
     }
 
+    let has_key = std::env::var("MINIMAX_API_KEY").map(|k| !k.is_empty()).unwrap_or(false);
+    if has_key {
+        print!("\x1b[32m  ✓ API key set\x1b[0m\n");
+    } else {
+        print!("\x1b[31m  ✗ No MINIMAX_API_KEY env var!\x1b[0m\n");
+    }
+    print!("\n");
+
     let state = AppState {
-        session_db: Arc::new(Mutex::new(session_db)),
-        config: Arc::new(Mutex::new(config_loader)),
+        session_db: Arc::new(RwLock::new(session_db)),
+        config: Arc::new(RwLock::new(config_loader)),
     };
 
     let app = create_router(state);
 
     let addr = format!("0.0.0.0:{}", port);
-    println!("Gateway server starting on http://{}", addr);
-    
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
@@ -125,7 +143,7 @@ async fn chat(
     State(state): State<AppState>,
     Json(req): Json<ChatRequest>,
 ) -> Result<Json<ChatResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let config = state.config.lock().await.get().clone();
+    let config = state.config.read().await.get().clone();
     let api_url = req.api_url
         .or_else(|| std::env::var("MINIMAX_API_URL").ok())
         .unwrap_or_else(|| config.api_url.clone());
@@ -137,14 +155,18 @@ async fn chat(
     let session_id = if let Some(ref sid) = req.session_id {
         sid.clone()
     } else {
-        let new_session = state.session_db.lock().await.create_session(Some(model.clone())).await
+        let new_session = state.session_db.write().await.create_session(Some(model.clone())).await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })))?;
         new_session.id
     };
+    let sid_short = &session_id[..8.min(session_id.len())];
+    let user_msg = req.messages.last().map(|m| m.content.clone()).unwrap_or_default();
+    let preview = if user_msg.len() > 80 { format!("{}...", &user_msg[..user_msg.ceil_char_boundary(80)]) } else { user_msg };
+    print!("\x1b[35m[chat] POST /api/chat session={} msgs={} user=\"{}\"\x1b[0m\n", sid_short, req.messages.len(), preview);
 
     for msg in &req.messages {
         let role = if msg.role == "user" { "user" } else if msg.role == "assistant" { "assistant" } else { &msg.role };
-        state.session_db.lock().await.save_message(&session_id, role, &msg.content)
+        state.session_db.write().await.save_message(&session_id, role, &msg.content)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })))?;
     }
@@ -163,7 +185,7 @@ async fn chat(
 
     match chat::run_conversation(&model, &api_url, &api_key, messages).await {
         Ok(response) => {
-            state.session_db.lock().await.save_message(&session_id, "assistant", &response.content)
+            state.session_db.write().await.save_message(&session_id, "assistant", &response.content)
                 .await
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })))?;
             Ok(Json(ChatResponse {
@@ -181,7 +203,7 @@ async fn chat_stream(
     State(state): State<AppState>,
     Json(req): Json<ChatRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let config = state.config.lock().await.get().clone();
+    let config = state.config.read().await.get().clone();
     let api_url = req.api_url
         .or_else(|| std::env::var("MINIMAX_API_URL").ok())
         .unwrap_or_else(|| config.api_url.clone());
@@ -193,16 +215,21 @@ async fn chat_stream(
     let session_id = match req.session_id {
         Some(ref sid) => sid.clone(),
         None => {
-            let new_session = state.session_db.lock().await.create_session(Some(model.clone()))
+            let new_session = state.session_db.write().await.create_session(Some(model.clone()))
                 .await
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })))?;
             new_session.id
         }
     };
 
+    let sid_short = &session_id[..8.min(session_id.len())];
+    let user_msg = req.messages.last().map(|m| m.content.clone()).unwrap_or_default();
+    let preview = if user_msg.len() > 80 { format!("{}...", &user_msg[..user_msg.ceil_char_boundary(80)]) } else { user_msg };
+    print!("\x1b[35m[stream] POST /api/chat/stream session={} msgs={} user=\"{}\"\x1b[0m\n", sid_short, req.messages.len(), preview);
+
     for msg in &req.messages {
         let role = if msg.role == "user" { "user" } else if msg.role == "assistant" { "assistant" } else { &msg.role };
-        state.session_db.lock().await.save_message(&session_id, role, &msg.content)
+        state.session_db.write().await.save_message(&session_id, role, &msg.content)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })))?;
     }
@@ -223,16 +250,17 @@ async fn chat_stream(
 
     let session_id_clone = session_id.clone();
     let state_clone = state.clone();
+    let sid_log = session_id[..8.min(session_id.len())].to_string();
 
     tokio::spawn(async move {
-        eprintln!("[stream] Starting run_conversation for session {}", session_id_clone);
         let result = chat::run_conversation(&model, &api_url, &api_key, messages).await;
 
         match result {
             Ok(response) => {
                 let full_content = response.content;
-                let total_len = full_content.len();
-                eprintln!("[stream] Got response, content_len={}, session={}", total_len, session_id_clone);
+                let total_chars_count = full_content.chars().count();
+                let resp_preview = if full_content.len() > 100 { format!("{}...", &full_content[..full_content.ceil_char_boundary(100)]) } else { full_content.clone() };
+                print!("\x1b[32m[stream] session={} sending {} chars | response=\"{}\"\x1b[0m\n", sid_log, total_chars_count, resp_preview);
 
                 tx.send(Ok(Event::default().data(format!(r#"{{"session_id":"{}"}}"#, session_id_clone)))).ok();
 
@@ -240,6 +268,7 @@ async fn chat_stream(
                 let total_chars = chars.len();
                 let chars_per_chunk = 8.max(total_chars / 40);
                 let mut pos = 0;
+                let mut chunks_sent = 0;
                 while pos < total_chars {
                     let end = (pos + chars_per_chunk).min(total_chars);
                     let chunk: String = chars[pos..end].iter().collect();
@@ -250,20 +279,22 @@ async fn chat_stream(
                     if let Ok(event) = serde_json::to_string(&event_data) {
                         tx.send(Ok(Event::default().data(event))).ok();
                     }
+                    chunks_sent += 1;
                     pos = end;
                 }
 
                 if !full_content.is_empty() {
-                    state_clone.session_db.lock().await
+                    state_clone.session_db.write().await
                         .save_message(&session_id_clone, "assistant", &full_content)
                         .await
                         .ok();
                 }
 
                 tx.send(Ok(Event::default().data(r#"{"done":true}"#))).ok();
+                print!("\x1b[32m[stream] session={} ✓ complete ({} chunks, {} chars)\x1b[0m\n", sid_log, chunks_sent, total_chars_count);
             }
             Err(e) => {
-                eprintln!("[stream] ERROR in run_conversation for session {}: {}", session_id_clone, e);
+                print!("\x1b[31m[stream] session={} ✗ ERROR: {}\x1b[0m\n", sid_log, e);
                 let error_data = serde_json::json!({
                     "error": e.to_string()
                 });
@@ -282,7 +313,7 @@ async fn chat_stream(
 async fn list_sessions(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<SessionInfo>>, (StatusCode, Json<ErrorResponse>)> {
-    match state.session_db.lock().await.list_sessions().await {
+    match state.session_db.read().await.list_sessions().await {
         Ok(sessions) => Ok(Json(sessions)),
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
             error: e.to_string(),
@@ -294,7 +325,7 @@ async fn create_session(
     State(state): State<AppState>,
     Json(req): Json<CreateSessionRequest>,
 ) -> Result<Json<SessionInfo>, (StatusCode, Json<ErrorResponse>)> {
-    match state.session_db.lock().await.create_session(req.model).await {
+    match state.session_db.write().await.create_session(req.model).await {
         Ok(session) => Ok(Json(session)),
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
             error: e.to_string(),
@@ -306,7 +337,7 @@ async fn get_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<SessionInfo>, (StatusCode, Json<ErrorResponse>)> {
-    match state.session_db.lock().await.get_session(&id).await {
+    match state.session_db.read().await.get_session(&id).await {
         Ok(Some(s)) => Ok(Json(SessionInfo {
             id: s.id,
             created_at: s.created_at,
@@ -326,7 +357,7 @@ async fn get_session_messages(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<SessionMessage>>, (StatusCode, Json<ErrorResponse>)> {
-    match state.session_db.lock().await.get_messages(&id).await {
+    match state.session_db.read().await.get_messages(&id).await {
         Ok(messages) => Ok(Json(messages)),
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
             error: e.to_string(),
@@ -367,7 +398,7 @@ async fn delete_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<()>, (StatusCode, Json<ErrorResponse>)> {
-    match state.session_db.lock().await.delete_session(&id).await {
+    match state.session_db.write().await.delete_session(&id).await {
         Ok(_) => Ok(Json(())),
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
             error: e.to_string(),
@@ -529,7 +560,7 @@ async fn exec_terminal(
 async fn get_config(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let config = state.config.lock().await.get().clone();
+    let config = state.config.read().await.get().clone();
     Ok(Json(serde_json::json!({
         "model": config.model,
         "provider": config.provider,
@@ -543,12 +574,12 @@ async fn update_config(
     State(state): State<AppState>,
     Json(update): Json<ConfigUpdate>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    if let Err(e) = state.config.lock().await.update(update) {
+    if let Err(e) = state.config.write().await.update(update) {
         return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
             error: e.to_string(),
         })));
     }
-    let config = state.config.lock().await.get().clone();
+    let config = state.config.read().await.get().clone();
     Ok(Json(serde_json::json!({
         "model": config.model,
         "provider": config.provider,

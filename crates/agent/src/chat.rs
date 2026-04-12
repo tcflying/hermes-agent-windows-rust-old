@@ -7,6 +7,23 @@ use tokio::sync::Mutex;
 
 const MAX_TOOL_ITERATIONS: usize = 10;
 
+fn log_agent(level: &str, msg: &str) {
+    let now = std::time::SystemTime::now();
+    let dur = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let secs = dur.as_secs() % 86400;
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    let color = match level {
+        "ok" => "\x1b[32m",
+        "warn" => "\x1b[33m",
+        "err" => "\x1b[31m",
+        "tool" => "\x1b[36m",
+        _ => "\x1b[0m",
+    };
+    print!("{}[{:02}:{:02}:{:02}] {}\x1b[0m\n", color, h, m, s, msg);
+}
+
 const SYSTEM_PROMPT: &str = r#"You are Hermes Agent, an AI assistant running directly on the user's Windows computer. You have full access to the user's system through the following tools:
 
 - **terminal**: Execute any Windows command (PowerShell, cmd, etc.). Use this to run programs, list files, manage processes, install software, open applications — anything you can do in a terminal.
@@ -107,6 +124,7 @@ impl ChatAgent {
     ) -> Result<ChatResponse> {
         let mut all_messages = Vec::new();
         let mut tool_iterations = 0;
+        let start = std::time::Instant::now();
 
         let has_system = messages.iter().any(|m| m.role == "system");
         if !has_system {
@@ -131,22 +149,30 @@ impl ChatAgent {
                 }
             }
 
-            eprintln!("[agent] Calling chat_completion, model={}, msg_count={}", model, all_messages.len());
+            log_agent("", &format!("→ {} ({} msgs)", model.split('/').last().unwrap_or(model), all_messages.len()));
             let response = self.chat_completion(api_url, api_key, model, &all_messages).await?;
 
             if let Some(assistant_message) = response.choices.first() {
                 let content = assistant_message.message.content.clone().unwrap_or_default();
                 let tool_calls = assistant_message.message.tool_calls.clone();
 
-                eprintln!("[agent] Got response, content_len={}, has_tool_calls={}", content.len(), tool_calls.is_some());
-
                 if let Some(calls) = tool_calls {
                     tool_iterations += 1;
                     if tool_iterations >= MAX_TOOL_ITERATIONS {
-                        eprintln!("[agent] ERROR: Max tool iterations ({}) exceeded, stopping", MAX_TOOL_ITERATIONS);
+                        log_agent("err", &format!("✗ Max tool iterations ({}) exceeded!", MAX_TOOL_ITERATIONS));
                         return Err(anyhow::anyhow!("Max tool iterations ({}) exceeded", MAX_TOOL_ITERATIONS));
                     }
-                    eprintln!("[agent] Executing {} tool calls (iteration {}/{})", calls.len(), tool_iterations, MAX_TOOL_ITERATIONS);
+                    let tool_names: Vec<String> = calls.iter().map(|c| {
+                        let args: serde_json::Value = serde_json::from_str(&c.function.arguments).unwrap_or_default();
+                        let preview: String = match c.function.name.as_str() {
+                            "terminal" => args.get("command").and_then(|v| v.as_str()).unwrap_or("").chars().take(40).collect(),
+                            "file_read" | "file_write" => args.get("path").and_then(|v| v.as_str()).unwrap_or("").chars().take(40).collect(),
+                            "list_directory" => args.get("path").and_then(|v| v.as_str()).unwrap_or(".").chars().take(40).collect(),
+                            _ => c.function.arguments.chars().take(30).collect(),
+                        };
+                        format!("{}(\"{}\")", c.function.name, preview)
+                    }).collect();
+                    log_agent("tool", &format!("⚡ {} [iter {}/{}]", tool_names.join(", "), tool_iterations, MAX_TOOL_ITERATIONS));
                     all_messages.push(Message {
                         role: "assistant".to_string(),
                         content: assistant_message.message.content.clone(),
@@ -156,15 +182,16 @@ impl ChatAgent {
                     });
 
                     let tool_results = self.execute_tools(&calls).await?;
-                    eprintln!("[agent] Tool execution complete, {} results", tool_results.len());
-                    for (i, result) in tool_results.iter().enumerate() {
-                        eprintln!("[agent] Tool result[{}]: role={}, content_len={}, tool_call_id={:?}", 
-                            i, result.role, result.content.as_ref().map(|c| c.len()).unwrap_or(0), result.tool_call_id);
+                    for result in &tool_results {
+                        let rlen = result.content.as_ref().map(|c| c.len()).unwrap_or(0);
+                        log_agent("ok", &format!("  ✓ {} → {} bytes", result.name.as_deref().unwrap_or("?"), rlen));
                         all_messages.push(result.clone());
                     }
                     continue;
                 }
 
+                let elapsed = start.elapsed().as_secs();
+                log_agent("ok", &format!("✓ Done: {} bytes in {}s", content.len(), elapsed));
                 return Ok(ChatResponse {
                     content,
                     tool_calls: None,
@@ -329,7 +356,7 @@ fn execute_file_write(path: &str, content: &str) -> String {
 fn execute_list_directory(path: &str) -> String {
     let entries: Vec<String> = std::fs::read_dir(path)
         .unwrap_or_else(|e| {
-            eprintln!("Error listing directory: {}", e);
+            log_agent("err", &format!("Error listing directory: {}", e));
             std::fs::read_dir(".").unwrap_or_else(|_| panic!("Cannot list current directory"))
         })
         .filter_map(|e| e.ok())
