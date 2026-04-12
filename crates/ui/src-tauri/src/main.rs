@@ -287,6 +287,10 @@ fn main() {
         .setup(|app| {
             let window = app.get_webview_window("main").unwrap();
             window.set_title("Hermes Agent").ok();
+            #[cfg(debug_assertions)]
+            {
+                window.open_devtools();
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
