@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { chatStream, listSessions, healthCheck, getSessionMessages, deleteSession, getConfig, ChatMessage, SessionInfo } from "../api";
 import { MarkdownRenderer } from "../components/MarkdownRenderer";
 import { ToolCallList, parseToolCalls } from "../components/ToolCallCard";
@@ -24,6 +24,14 @@ const SLASH_COMMANDS = [
   { name: "/sessions", description: "Show recent sessions", icon: "📋" },
 ];
 
+interface SessionState {
+  messages: ChatMessage[];
+  isLoading: boolean;
+  sessionId: string | null;
+  streamContent: string;
+  startTime: number | null;
+}
+
 function formatDate(iso: string): string {
   try {
     const d = new Date(iso);
@@ -43,13 +51,10 @@ function formatDate(iso: string): string {
 }
 
 export function ChatPage() {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [model, setModel] = useState(MODELS[0]);
-  const [isLoading, setIsLoading] = useState(false);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
-  const [activeSession, setActiveSession] = useState<string | null>(null);
-  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [activeSessionKey, setActiveSessionKey] = useState<string>("__new__");
   const [backendUp, setBackendUp] = useState(false);
   const [showSidebar, setShowSidebar] = useState(true);
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
@@ -60,6 +65,21 @@ export function ChatPage() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const slashMenuRef = useRef<HTMLDivElement>(null);
+
+  const [sessionStates, setSessionStates] = useState<Record<string, SessionState>>({
+    "__new__": { messages: [], isLoading: false, sessionId: null, streamContent: "", startTime: null },
+  });
+
+  const current = sessionStates[activeSessionKey] || sessionStates["__new__"];
+  const setCurrent = useCallback((updater: (prev: SessionState) => SessionState) => {
+    setSessionStates(prev => ({
+      ...prev,
+      [activeSessionKey]: updater(prev[activeSessionKey] || { messages: [], isLoading: false, sessionId: null, streamContent: "", startTime: null }),
+    }));
+  }, [activeSessionKey]);
+
+  const isLoading = current.isLoading;
+  const messages = current.messages;
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -96,11 +116,14 @@ export function ChatPage() {
     setShowSlashMenu(false);
     setSlashFilter("");
     if (cmd === "/new") {
-      setMessages([]);
-      setActiveSession(null);
-      setSessionId(null);
+      const newKey = `__new_${Date.now()}__`;
+      setSessionStates(prev => ({
+        ...prev,
+        [newKey]: { messages: [], isLoading: false, sessionId: null, streamContent: "", startTime: null },
+      }));
+      setActiveSessionKey(newKey);
     } else if (cmd === "/clear") {
-      setMessages([]);
+      setCurrent(prev => ({ ...prev, messages: [] }));
     } else if (cmd.startsWith("/model ")) {
       const newModel = cmd.slice(7).trim();
       if (MODELS.includes(newModel)) {
@@ -108,24 +131,33 @@ export function ChatPage() {
       }
     } else if (cmd === "/help") {
       const helpText = SLASH_COMMANDS.map(c => `${c.name} — ${c.description}`).join("\n");
-      setMessages(prev => [...prev,
-        { role: "user", content: "/help" },
-        { role: "assistant", content: `**Available Commands:**\n${helpText}` },
-      ]);
+      setCurrent(prev => ({
+        ...prev,
+        messages: [...prev.messages,
+          { role: "user", content: "/help" },
+          { role: "assistant", content: `**Available Commands:**\n${helpText}` },
+        ],
+      }));
     } else if (cmd === "/sessions") {
       if (sessions.length === 0) {
-        setMessages(prev => [...prev,
-          { role: "user", content: "/sessions" },
-          { role: "assistant", content: "No sessions found." },
-        ]);
+        setCurrent(prev => ({
+          ...prev,
+          messages: [...prev.messages,
+            { role: "user", content: "/sessions" },
+            { role: "assistant", content: "No sessions found." },
+          ],
+        }));
       } else {
-        const sessionList = sessions.slice(0, 5).map((s, i) => 
+        const sessionList = sessions.slice(0, 5).map((s, i) =>
           `${i + 1}. **${s.model || "Chat"}** — ${formatDate(s.updated_at)}`
         ).join("\n");
-        setMessages(prev => [...prev,
-          { role: "user", content: "/sessions" },
-          { role: "assistant", content: `**Recent Sessions:**\n${sessionList}` },
-        ]);
+        setCurrent(prev => ({
+          ...prev,
+          messages: [...prev.messages,
+            { role: "user", content: "/sessions" },
+            { role: "assistant", content: `**Recent Sessions:**\n${sessionList}` },
+          ],
+        }));
       }
     }
   };
@@ -137,39 +169,60 @@ export function ChatPage() {
       return;
     }
     const userMsg: ChatMessage = { role: "user", content: input.trim() };
-    const newMessages = [...messages, userMsg];
-    setMessages(newMessages);
+    const key = activeSessionKey;
+
     setInput("");
-    setIsLoading(true);
     setShowSlashMenu(false);
 
-    const assistantMsgId = newMessages.length;
-    setMessages(prev => [...prev, { role: "assistant", content: "" }]);
+    setSessionStates(prev => {
+      const st = prev[key] || { messages: [], isLoading: false, sessionId: null, streamContent: "", startTime: null };
+      const newMessages = [...st.messages, userMsg];
+      return {
+        ...prev,
+        [key]: {
+          ...st,
+          messages: [...newMessages, { role: "assistant", content: "" }],
+          isLoading: true,
+          startTime: Date.now(),
+          sessionId: st.sessionId,
+        },
+      };
+    });
 
     let accumulatedContent = "";
 
     try {
+      const stateSnapshot = sessionStates[key];
+      const msgs = [...(stateSnapshot?.messages || []), userMsg];
+      const sid = stateSnapshot?.sessionId;
+
       const returnedSessionId = await chatStream(
-        { model, messages: newMessages, api_key: apiKey, session_id: sessionId ?? undefined },
+        { model, messages: msgs, api_key: apiKey, session_id: sid ?? undefined },
         {
           onChunk: (chunk) => {
             if (chunk.done) return;
             accumulatedContent += chunk.content;
-            setMessages(prev => {
-              const updated = [...prev];
-              if (updated[assistantMsgId]) {
-                updated[assistantMsgId] = { ...updated[assistantMsgId], content: accumulatedContent };
+            setSessionStates(prev => {
+              const st = prev[key];
+              if (!st) return prev;
+              const updated = [...st.messages];
+              const lastIdx = updated.length - 1;
+              if (lastIdx >= 0) {
+                updated[lastIdx] = { ...updated[lastIdx], content: accumulatedContent };
               }
-              return updated;
+              return { ...prev, [key]: { ...st, messages: updated, streamContent: accumulatedContent } };
             });
           },
           onError: (err) => {
-            setMessages(prev => {
-              const updated = [...prev];
-              if (updated[assistantMsgId]) {
-                updated[assistantMsgId] = { ...updated[assistantMsgId], content: `Error: ${err.message}` };
+            setSessionStates(prev => {
+              const st = prev[key];
+              if (!st) return prev;
+              const updated = [...st.messages];
+              const lastIdx = updated.length - 1;
+              if (lastIdx >= 0) {
+                updated[lastIdx] = { ...updated[lastIdx], content: `Error: ${err.message}` };
               }
-              return updated;
+              return { ...prev, [key]: { ...st, messages: updated } };
             });
           },
           onDone: () => {
@@ -178,25 +231,37 @@ export function ChatPage() {
         }
       );
       if (returnedSessionId) {
-        setSessionId(returnedSessionId);
+        setSessionStates(prev => ({
+          ...prev,
+          [key]: { ...(prev[key] || prev["__new__"]), sessionId: returnedSessionId },
+        }));
       }
     } catch (e) {
-      setMessages(prev => {
-        const updated = [...prev];
-        if (updated[assistantMsgId]) {
-          updated[assistantMsgId] = { ...updated[assistantMsgId], content: `Error: ${e instanceof Error ? e.message : String(e)}` };
+      setSessionStates(prev => {
+        const st = prev[key];
+        if (!st) return prev;
+        const updated = [...st.messages];
+        const lastIdx = updated.length - 1;
+        if (lastIdx >= 0) {
+          updated[lastIdx] = { ...updated[lastIdx], content: `Error: ${e instanceof Error ? e.message : String(e)}` };
         }
-        return updated;
+        return { ...prev, [key]: { ...st, messages: updated } };
       });
     } finally {
-      setIsLoading(false);
+      setSessionStates(prev => ({
+        ...prev,
+        [key]: { ...(prev[key] || prev["__new__"]), isLoading: false, startTime: null },
+      }));
     }
   };
 
   const handleNewChat = () => {
-    setMessages([]);
-    setActiveSession(null);
-    setSessionId(null);
+    const newKey = `__new_${Date.now()}__`;
+    setSessionStates(prev => ({
+      ...prev,
+      [newKey]: { messages: [], isLoading: false, sessionId: null, streamContent: "", startTime: null },
+    }));
+    setActiveSessionKey(newKey);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -252,7 +317,7 @@ export function ChatPage() {
   };
 
   const handleDelete = (idx: number) => {
-    setMessages(prev => prev.filter((_, i) => i !== idx));
+    setCurrent(prev => ({ ...prev, messages: prev.messages.filter((_, i) => i !== idx) }));
   };
 
   const handleDeleteSession = async (e: React.MouseEvent, sid: string) => {
@@ -260,13 +325,21 @@ export function ChatPage() {
     try {
       await deleteSession(sid);
       setSessions(prev => prev.filter(s => s.id !== sid));
-      if (activeSession === sid) {
-        setActiveSession(null);
-        setSessionId(null);
-        setMessages([]);
+      const keyToDelete = Object.entries(sessionStates).find(([_, st]) => st.sessionId === sid)?.[0];
+      if (keyToDelete && keyToDelete === activeSessionKey) {
+        handleNewChat();
+      }
+      if (keyToDelete) {
+        setSessionStates(prev => {
+          const next = { ...prev };
+          delete next[keyToDelete];
+          return next;
+        });
       }
     } catch { }
   };
+
+  const loadingSessions = Object.entries(sessionStates).filter(([_, st]) => st.isLoading);
 
   return (
     <div className="chat-page">
@@ -300,34 +373,53 @@ export function ChatPage() {
               {sessions.length === 0 && (
                 <div className="empty-sessions">No sessions yet</div>
               )}
-              {sessions.map(s => (
-                <div
-                  key={s.id}
-                  className={`session-item ${activeSession === s.id ? "active" : ""}`}
-                  onClick={async () => {
-                    setActiveSession(s.id);
-                    setSessionId(s.id);
-                    setMessages([]);
-                    try {
-                      const msgs = await getSessionMessages(s.id);
-                      setMessages(msgs.map(m => ({ role: m.role as "user" | "assistant", content: m.content })));
-                    } catch { }
-                  }}
-                >
-                  <MessageSquare size={14} />
-                  <div className="session-info">
-                    <div className="session-item-title">{s.model || "Chat"}</div>
-                    <div className="session-item-date">{formatDate(s.updated_at)}</div>
-                  </div>
-                  <button
-                    className="session-delete-btn"
-                    onClick={(e) => handleDeleteSession(e, s.id)}
-                    title="Delete session"
+              {sessions.map(s => {
+                const stKey = Object.entries(sessionStates).find(([_, st]) => st.sessionId === s.id)?.[0];
+                const isActive = stKey === activeSessionKey || (activeSessionKey.startsWith("__new") && stKey === undefined && activeSessionKey === "__new__");
+                const isThisLoading = stKey ? sessionStates[stKey]?.isLoading : false;
+                return (
+                  <div
+                    key={s.id}
+                    className={`session-item ${isActive ? "active" : ""}`}
+                    onClick={async () => {
+                      const existingKey = Object.entries(sessionStates).find(([_, st]) => st.sessionId === s.id)?.[0];
+                      if (existingKey) {
+                        setActiveSessionKey(existingKey);
+                      } else {
+                        const newKey = `ses_${s.id}`;
+                        try {
+                          const msgs = await getSessionMessages(s.id);
+                          setSessionStates(prev => ({
+                            ...prev,
+                            [newKey]: {
+                              messages: msgs.map(m => ({ role: m.role as "user" | "assistant", content: m.content })),
+                              isLoading: false,
+                              sessionId: s.id,
+                              streamContent: "",
+                              startTime: null,
+                            },
+                          }));
+                          setActiveSessionKey(newKey);
+                        } catch { }
+                      }
+                    }}
                   >
-                    <X size={12} />
-                  </button>
-                </div>
-              ))}
+                    {isThisLoading && <span style={{ color: "#f0ad4e", fontSize: 10, marginRight: 4 }}>●</span>}
+                    <MessageSquare size={14} />
+                    <div className="session-info">
+                      <div className="session-item-title">{s.model || "Chat"}</div>
+                      <div className="session-item-date">{formatDate(s.updated_at)}</div>
+                    </div>
+                    <button
+                      className="session-delete-btn"
+                      onClick={(e) => handleDeleteSession(e, s.id)}
+                      title="Delete session"
+                    >
+                      <X size={12} />
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           </aside>
         )}
@@ -343,24 +435,24 @@ export function ChatPage() {
             <div className="chat-messages">
               {messages.map((msg, i) => {
                 const toolCalls = msg.role === "assistant" ? parseToolCalls(msg.content) : null;
-                const displayContent = msg.role === "assistant" 
+                const displayContent = msg.role === "assistant"
                   ? msg.content.replace(/<tool_calls>[\s\S]*?<\/tool_calls>/g, "").trim()
                   : msg.content;
-                
+
                 return (
                   <div key={i} className={`message ${msg.role}`}>
                     <div className="message-header">
                       <div className="message-role">{msg.role === "user" ? "You" : "Hermes"}</div>
                       <div className="message-actions">
-                        <button 
-                          className="message-action-btn" 
+                        <button
+                          className="message-action-btn"
                           onClick={() => handleCopy(msg.content, i)}
                           title="Copy"
                         >
                           {copiedIdx === i ? <Check size={14} /> : <Copy size={14} />}
                         </button>
-                        <button 
-                          className="message-action-btn" 
+                        <button
+                          className="message-action-btn"
                           onClick={() => handleDelete(i)}
                           title="Delete"
                         >
@@ -385,6 +477,11 @@ export function ChatPage() {
                 <div className="message assistant">
                   <div className="message-header">
                     <div className="message-role">Hermes</div>
+                    {current.startTime && (
+                      <span style={{ color: "#888", fontSize: 11, marginLeft: 8 }}>
+                        thinking... {Math.floor((Date.now() - current.startTime) / 1000)}s
+                      </span>
+                    )}
                   </div>
                   <div className="message-content">
                     <span className="loading-dots"><span/><span/><span/></span>
@@ -436,6 +533,11 @@ export function ChatPage() {
         <div className="status-indicator">
           <div className={`status-dot ${backendUp ? "" : "error"}`} />
           <span>{backendUp ? "Backend connected" : "Backend offline"}</span>
+          {loadingSessions.length > 0 && (
+            <span style={{ color: "#f0ad4e", marginLeft: 12, fontSize: 11 }}>
+              ● {loadingSessions.length} active
+            </span>
+          )}
         </div>
         <div>{messages.length} messages · {model.split("/")[1]}</div>
       </div>

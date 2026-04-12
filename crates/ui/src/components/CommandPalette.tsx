@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { Search, MessageSquare, FileText, Terminal, Brain, Settings, LayoutDashboard, Plus, Moon, Sun, X } from "lucide-react";
 
