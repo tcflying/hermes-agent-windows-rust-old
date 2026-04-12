@@ -1,0 +1,78 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "terminal",
+      "description": "Execute a command on the user's Windows system. Use this to run PowerShell commands, open applications, manage files, install software, start programs, etc. Examples: 'dir C:\\' to list C drive, 'start msedge' to open Edge browser, 'start powershell' to open PowerShell, 'ipconfig' to check network, 'systeminfo' for system info. Always prefer executing commands over describing what to do.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "The command to execute. For Windows, use cmd /C commands or PowerShell commands."
+          },
+          "cwd": {
+            "type": "string",
+            "description": "Working directory for the command. Optional."
+          }
+        },
+        "required": ["command"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "file_read",
+      "description": "Read the contents of a file from the local filesystem. Use this to inspect code, configs, logs, or any text file.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute or relative path to the file to read."
+          }
+        },
+        "required": ["path"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "file_write",
+      "description": "Write content to a file on the local filesystem. Creates parent directories if needed. Use this to create or edit files.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute or relative path where the file should be written."
+          },
+          "content": {
+            "type": "string",
+            "description": "The content to write to the file."
+          }
+        },
+        "required": ["path", "content"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "list_directory",
+      "description": "List files and directories at the given path. Shows file sizes and indicates directories with a trailing /.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Directory path to list. Defaults to current directory."
+          }
+        },
+        "required": []
+      }
+    }
+  }
+]
