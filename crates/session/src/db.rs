@@ -190,3 +190,91 @@ pub struct SessionSearchResult {
     pub model: Option<String>,
     pub snippet: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn temp_db_path(name: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!("test_hermes_session_{}_{}.db", name, uuid::Uuid::new_v4()));
+        path
+    }
+
+    async fn cleanup(path: &PathBuf) {
+        let _ = tokio::fs::remove_file(path).await;
+        let wal = path.with_extension("db-wal");
+        let shm = path.with_extension("db-shm");
+        let _ = tokio::fs::remove_file(&wal).await;
+        let _ = tokio::fs::remove_file(&shm).await;
+    }
+
+    #[tokio::test]
+    async fn test_session_db_new() {
+        let path = temp_db_path("new");
+        let result = SessionDb::new(path.clone());
+        assert!(result.is_ok());
+        cleanup(&path).await;
+    }
+
+    #[tokio::test]
+    async fn test_create_and_get_session() {
+        let path = temp_db_path("create_get");
+        let db = SessionDb::new(path.clone()).unwrap();
+        let created = db.create_session(Some("gpt-4".into())).await.unwrap();
+        let fetched = db.get_session(&created.id).await.unwrap();
+        assert!(fetched.is_some());
+        let session = fetched.unwrap();
+        assert_eq!(session.id, created.id);
+        assert_eq!(session.model, Some("gpt-4".into()));
+        cleanup(&path).await;
+    }
+
+    #[tokio::test]
+    async fn test_list_sessions() {
+        let path = temp_db_path("list");
+        let db = SessionDb::new(path.clone()).unwrap();
+        db.create_session(None).await.unwrap();
+        db.create_session(None).await.unwrap();
+        let sessions = db.list_sessions().await.unwrap();
+        assert_eq!(sessions.len(), 2);
+        cleanup(&path).await;
+    }
+
+    #[tokio::test]
+    async fn test_save_and_get_messages() {
+        let path = temp_db_path("messages");
+        let db = SessionDb::new(path.clone()).unwrap();
+        let session = db.create_session(None).await.unwrap();
+        db.save_message(&session.id, "user", "hello").await.unwrap();
+        db.save_message(&session.id, "assistant", "hi there").await.unwrap();
+        let messages = db.get_messages(&session.id).await.unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[0].content, "hello");
+        assert_eq!(messages[1].role, "assistant");
+        assert_eq!(messages[1].content, "hi there");
+        cleanup(&path).await;
+    }
+
+    #[tokio::test]
+    async fn test_delete_session() {
+        let path = temp_db_path("delete");
+        let db = SessionDb::new(path.clone()).unwrap();
+        let session = db.create_session(None).await.unwrap();
+        db.delete_session(&session.id).await.unwrap();
+        let fetched = db.get_session(&session.id).await.unwrap();
+        assert!(fetched.is_none());
+        cleanup(&path).await;
+    }
+
+    #[tokio::test]
+    async fn test_get_nonexistent_session() {
+        let path = temp_db_path("nonexistent");
+        let db = SessionDb::new(path.clone()).unwrap();
+        let fetched = db.get_session("nonexistent").await.unwrap();
+        assert!(fetched.is_none());
+        cleanup(&path).await;
+    }
+}

@@ -315,3 +315,70 @@ pub fn detect_credentials() -> Vec<(String, bool)> {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_all_providers_returns_nonempty() {
+        let providers = all_providers();
+        assert!(!providers.is_empty());
+    }
+
+    #[test]
+    fn test_all_providers_has_minimax() {
+        let providers = all_providers();
+        assert!(providers.iter().any(|p| p.id == "minimax"));
+    }
+
+    #[test]
+    fn test_resolve_model_by_id() {
+        let result = resolve_model("MiniMax-M2.7-highspeed");
+        assert!(result.is_some());
+        let (base_url, _api_key_env, model_id) = result.unwrap();
+        assert_eq!(base_url, "https://api.minimaxi.com/v1");
+        assert_eq!(model_id, "MiniMax-M2.7-highspeed");
+    }
+
+    #[test]
+    fn test_resolve_model_by_alias() {
+        let result = resolve_model("m2.7");
+        assert!(result.is_some());
+        let (_base_url, _api_key_env, model_id) = result.unwrap();
+        assert_eq!(model_id, "MiniMax-M2.7-highspeed");
+    }
+
+    #[test]
+    fn test_resolve_model_case_insensitive() {
+        let result = resolve_model("MINIMAX-M2.7-HIGHSPEED");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_resolve_model_unknown_returns_none() {
+        let result = resolve_model("nonexistent-model-xyz");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_provider_def_has_models() {
+        let providers_with_models = all_providers()
+            .into_iter()
+            .filter(|p| !p.models.is_empty())
+            .count();
+        assert!(providers_with_models > 0);
+    }
+
+    #[test]
+    fn test_model_def_has_valid_base_url() {
+        for provider in all_providers() {
+            assert!(
+                provider.base_url.starts_with("https://"),
+                "provider '{}' base_url '{}' does not start with https://",
+                provider.id,
+                provider.base_url
+            );
+        }
+    }
+}

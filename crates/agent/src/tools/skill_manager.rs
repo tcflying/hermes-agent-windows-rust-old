@@ -244,3 +244,102 @@ impl Default for SkillManager {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_skill_manager_new() {
+        let _mgr = SkillManager::new();
+    }
+
+    #[test]
+    fn test_skill_manager_list_empty() {
+        let mgr = SkillManager::new();
+        let json_str = mgr.list();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_str).expect("list() should return valid JSON");
+        assert!(
+            parsed.get("count").is_some(),
+            "JSON should have 'count' field"
+        );
+        assert!(
+            parsed.get("skills").is_some(),
+            "JSON should have 'skills' field"
+        );
+        let skills = parsed["skills"]
+            .as_array()
+            .expect("'skills' should be an array");
+        assert_eq!(skills.len(), parsed["count"].as_u64().unwrap() as usize);
+    }
+
+    #[test]
+    fn test_skill_serialization() {
+        let skill = Skill {
+            name: "test-skill".to_string(),
+            description: "A test skill".to_string(),
+            content: "# Test\nSome content".to_string(),
+            created_at: "2025-01-01T00:00:00Z".to_string(),
+            updated_at: "2025-01-01T00:00:00Z".to_string(),
+            source: "user".to_string(),
+            enabled: true,
+        };
+        let json = serde_json::to_string(&skill).expect("Skill should serialize to JSON");
+        assert!(json.contains("test-skill"));
+        assert!(json.contains("A test skill"));
+        assert!(json.contains("# Test\\nSome content"));
+        assert!(json.contains("created_at"));
+        assert!(json.contains("updated_at"));
+        assert!(json.contains("source"));
+        assert!(json.contains("enabled"));
+    }
+
+    #[test]
+    fn test_skill_deserialization() {
+        let json = r#"{
+            "name": "deser-test",
+            "description": "deser desc",
+            "content": "body text",
+            "created_at": "2025-06-01T12:00:00Z",
+            "updated_at": "2025-06-01T12:00:00Z",
+            "source": "auto",
+            "enabled": false
+        }"#;
+        let skill: Skill = serde_json::from_str(json).expect("JSON should deserialize to Skill");
+        assert_eq!(skill.name, "deser-test");
+        assert_eq!(skill.description, "deser desc");
+        assert_eq!(skill.content, "body text");
+        assert_eq!(skill.source, "auto");
+        assert!(!skill.enabled);
+        assert_eq!(skill.created_at, "2025-06-01T12:00:00Z");
+    }
+
+    #[test]
+    fn test_view_nonexistent_skill() {
+        let mgr = SkillManager::new();
+        let result = mgr.view("nonexistent");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("view() should return valid JSON");
+        assert!(
+            parsed.get("error").is_some(),
+            "Should return error for missing skill"
+        );
+    }
+
+    #[test]
+    fn test_search_empty() {
+        let mgr = SkillManager::new();
+        let result = mgr.search("anything");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("search() should return valid JSON");
+        assert_eq!(parsed["count"].as_u64(), Some(0));
+    }
+
+    #[test]
+    fn test_get_enabled_skills_content_empty() {
+        let mgr = SkillManager::new();
+        let content = mgr.get_enabled_skills_content();
+        assert!(content.is_empty(), "Should be empty when no skills loaded");
+    }
+}
