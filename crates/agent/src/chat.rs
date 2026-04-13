@@ -9,6 +9,7 @@ use tokio::sync::Mutex;
 use crate::compression::ContextCompressor;
 use crate::memory::MemoryManager;
 use crate::prompt_builder::PromptBuilder;
+use crate::tools::skill_manager::SkillManager;
 
 const MAX_TOOL_ITERATIONS: usize = 30;
 
@@ -41,6 +42,7 @@ pub fn get_tool_definitions() -> Vec<serde_json::Value> {
 pub struct ChatAgent {
     iteration_budget: Arc<Mutex<IterationBudgetInternal>>,
     memory_manager: Arc<Mutex<MemoryManager>>,
+    skill_manager: Arc<Mutex<SkillManager>>,
     system_prompt: String,
     compressor: ContextCompressor,
 }
@@ -114,14 +116,19 @@ impl ChatAgent {
         let snapshot = mem_store.snapshot().clone();
         let manager = MemoryManager::new(mem_store);
 
+        let skill_mgr = SkillManager::new();
+        let skills_content = skill_mgr.get_enabled_skills_content();
+
         let tool_defs = get_tool_definitions();
         let prompt = PromptBuilder::new()
             .with_memory_snapshot(snapshot)
+            .with_skills_content(skills_content)
             .build(&tool_defs);
 
         Self {
             iteration_budget: Arc::new(Mutex::new(IterationBudgetInternal::new(90))),
             memory_manager: Arc::new(Mutex::new(manager)),
+            skill_manager: Arc::new(Mutex::new(skill_mgr)),
             system_prompt: prompt,
             compressor: ContextCompressor::new(),
         }
@@ -138,6 +145,10 @@ impl ChatAgent {
     ) -> Result<ChatResponse> {
         let mut all_messages = Vec::new();
         let mut tool_iterations = 0;
+        let mut tools_used = false;
+        let first_user_msg: Option<String> = messages.iter()
+            .find(|m| m.role == "user")
+            .and_then(|m| m.content.clone());
         let start = std::time::Instant::now();
 
         let has_system = messages.iter().any(|m| m.role == "system");
@@ -266,6 +277,7 @@ impl ChatAgent {
 
             let reason = finish_reason.unwrap_or_default();
             if reason == "tool_calls" || !accumulated_tool_calls.is_empty() {
+                tools_used = true;
                 tool_iterations += 1;
                 if tool_iterations >= MAX_TOOL_ITERATIONS {
                     log_agent("err", &format!("✗ Max tool iterations ({}) exceeded!", MAX_TOOL_ITERATIONS));
@@ -306,6 +318,17 @@ impl ChatAgent {
 
             let elapsed = start.elapsed().as_secs();
             log_agent("ok", &format!("✓ Done: {} bytes in {}s", accumulated_content.len(), elapsed));
+
+            if tools_used {
+                if let Some(ref user_msg) = first_user_msg {
+                    let summary = user_msg.chars().take(200).collect::<String>();
+                    let solution = accumulated_content.chars().take(500).collect::<String>();
+                    let mut sm = self.skill_manager.lock().await;
+                    let result = sm.auto_create_from_experience(&summary, &solution);
+                    log_agent("tool", &format!("⚡ Auto-skill created: {}", result));
+                }
+            }
+
             return Ok(ChatResponse {
                 content: accumulated_content,
                 tool_calls: None,

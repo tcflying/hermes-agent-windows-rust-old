@@ -1840,17 +1840,22 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "dirs 5.0.1",
  "hermes-config",
  "hermes-session",
  "hermes-tool-registry",
  "hermes-utils",
+ "lazy_static",
+ "regex",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-stream",
  "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]

@@ -1,5 +1,5 @@
 import { Outlet, NavLink } from "react-router-dom";
-import { MessageSquare, FolderOpen, Terminal, Brain, Sparkles, Settings, LayoutDashboard, Menu, X, Activity } from "lucide-react";
+import { MessageSquare, FolderOpen, Terminal, Brain, Sparkles, Settings, LayoutDashboard, Menu, X, Activity, Eye } from "lucide-react";
 import { useState, useEffect, useCallback } from "react";
 import { CommandPalette } from "./CommandPalette";
 
@@ -12,6 +12,7 @@ const NAV_ITEMS = [
   { path: "/inspector", icon: Activity, label: "Inspector" },
   { path: "/settings", icon: Settings, label: "Settings" },
   { path: "/dashboard", icon: LayoutDashboard, label: "Dashboard" },
+  { path: "/hud", icon: Eye, label: "HUD" },
 ];
 
 export function WorkspaceLayout() {

@@ -1,23 +1,28 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{Json, sse::{Event, Sse}, IntoResponse},
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 use anyhow::Result;
 use futures_util::TryStreamExt;
 use hermes_agent::chat::{self, Message};
+use hermes_agent::tools::skill_manager::SkillManager;
+use hermes_agent::MemoryStore;
 use hermes_config::{ConfigLoader, ConfigUpdate};
 use hermes_session::{SessionDb, SessionInfo, SessionMessage};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use std::path::PathBuf;
 use std::fs;
+use std::time::Instant;
 use tower_http::cors::{CorsLayer, Any};
+use crate::logging::{LogBuffer, log_agent};
+use hermes_config::providers;
 
 const DEFAULT_API_URL: &str = "https://api.minimaxi.com/v1";
 
@@ -26,6 +31,8 @@ pub struct AppState {
     pub session_db: Arc<RwLock<SessionDb>>,
     pub config: Arc<RwLock<ConfigLoader>>,
     pub interrupt_flag: Arc<AtomicBool>,
+    pub log_buffer: Arc<Mutex<LogBuffer>>,
+    pub start_time: Arc<Instant>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,8 +81,20 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/terminal", post(exec_terminal))
         .route("/api/chat/interrupt", post(chat_interrupt))
         .route("/api/config", get(get_config).put(update_config))
+        .route("/api/config/providers", get(list_providers))
+        .route("/api/config/provider", post(set_provider))
         .route("/api/memory/read", get(memory_read))
         .route("/api/memory/action", post(memory_action))
+        .route("/api/hud/stats", get(hud_stats))
+        .route("/api/hud/growth", get(hud_growth))
+        .route("/api/hud/health", get(hud_health))
+        .route("/api/skills", get(list_skills))
+        .route("/api/skills/create", post(create_skill))
+        .route("/api/skills/{name}", delete(delete_skill))
+        .route("/api/skills/growth", get(skills_growth))
+        .route("/api/logs", get(get_logs))
+        .route("/api/models/list", get(list_models))
+        .route("/api/models/switch", post(switch_model))
         .layer(cors)
         .with_state(state)
 }
@@ -132,6 +151,8 @@ pub async fn start_server(port: u16) -> Result<()> {
         session_db: Arc::new(RwLock::new(session_db)),
         config: Arc::new(RwLock::new(config_loader)),
         interrupt_flag: Arc::new(AtomicBool::new(false)),
+        log_buffer: Arc::new(Mutex::new(LogBuffer::new(2000))),
+        start_time: Arc::new(Instant::now()),
     };
 
     let app = create_router(state);
@@ -579,6 +600,71 @@ async fn update_config(
     })))
 }
 
+async fn list_providers() -> Json<serde_json::Value> {
+    let catalog = providers::all_providers();
+    let credentials = providers::detect_credentials();
+    Json(serde_json::json!({
+        "providers": catalog,
+        "credentials": credentials.iter()
+            .map(|(id, has_key)| (id.clone(), *has_key))
+            .collect::<std::collections::HashMap<String, bool>>(),
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct SetProviderRequest {
+    provider_id: String,
+    api_key: Option<String>,
+    model: Option<String>,
+}
+
+async fn set_provider(
+    State(state): State<AppState>,
+    Json(req): Json<SetProviderRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let provider = providers::all_providers()
+        .into_iter()
+        .find(|p| p.id == req.provider_id)
+        .ok_or_else(|| (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse { error: format!("Unknown provider: {}", req.provider_id) }),
+        ))?;
+
+    let model = req.model.unwrap_or_else(|| {
+        provider.models.first()
+            .map(|m| m.id.clone())
+            .unwrap_or_default()
+    });
+
+    let mut update = ConfigUpdate {
+        model: Some(model),
+        provider: Some(provider.id.clone()),
+        api_url: Some(provider.base_url.clone()),
+        api_key: req.api_key,
+        skin: None,
+    };
+
+    if let Some(ref key) = update.api_key {
+        if !key.is_empty() {
+            std::env::set_var(&provider.api_key_env, key);
+        }
+    }
+
+    if let Err(e) = state.config.write().await.update(update) {
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
+            error: e.to_string(),
+        })));
+    }
+
+    let config = state.config.read().await.get().clone();
+    Ok(Json(serde_json::json!({
+        "model": config.model,
+        "provider": config.provider,
+        "api_url": config.api_url,
+        "api_key": config.api_key,
+    })))
+}
+
 #[derive(Debug, Deserialize)]
 struct CreateSessionRequest {
     model: Option<String>,
@@ -621,4 +707,251 @@ async fn memory_action(
         Ok(v) => Ok(Json(v)),
         Err(_) => Ok(Json(serde_json::json!({"raw": result}))),
     }
+}
+
+async fn hud_stats(
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    let config = state.config.read().await.get().clone();
+    let uptime = state.start_time.elapsed().as_secs();
+    let session_count = state.session_db.read().await.list_sessions().await
+        .map(|s| s.len()).unwrap_or(0);
+    let mut msg_count = 0;
+    if let Ok(sessions) = state.session_db.read().await.list_sessions().await {
+        for s in &sessions {
+            if let Ok(msgs) = state.session_db.read().await.get_messages(&s.id).await {
+                msg_count += msgs.len();
+            }
+        }
+    }
+    let skill_mgr = SkillManager::new();
+    let skills = serde_json::from_str::<serde_json::Value>(&skill_mgr.list())
+        .ok()
+        .and_then(|v| v.as_array().map(|a| a.len()))
+        .unwrap_or(0);
+    Json(serde_json::json!({
+        "total_sessions": session_count,
+        "total_messages": msg_count,
+        "total_skills": skills,
+        "active_model": config.model,
+        "uptime_seconds": uptime,
+        "backend_status": "online",
+    }))
+}
+
+async fn hud_growth() -> Json<serde_json::Value> {
+    let skill_mgr = SkillManager::new();
+    let list_str = skill_mgr.list();
+    let skills: Vec<serde_json::Value> = serde_json::from_str(&list_str).unwrap_or_default();
+    let mut by_date: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    for skill in &skills {
+        let date = skill.get("created_at")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let name = skill.get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        by_date.entry(date).or_default().push(name);
+    }
+    let mut result = Vec::new();
+    let mut running = 0;
+    for (date, names) in by_date {
+        running += names.len();
+        result.push(serde_json::json!({
+            "date": date,
+            "count": running,
+            "new_skills": names,
+        }));
+    }
+    Json(serde_json::json!({"skills_over_time": result}))
+}
+
+async fn hud_health(
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    let config = state.config.read().await.get().clone();
+    let db_ok = state.session_db.read().await.list_sessions().await.is_ok();
+    let mut mem_store = hermes_agent::MemoryStore::new();
+    let mem_entries = if mem_store.load_from_disk().is_ok() {
+        serde_json::from_str::<serde_json::Value>(&mem_store.execute_action("read", "memory", None, None))
+            .ok()
+            .and_then(|v| v.as_array().map(|a| a.len()))
+            .unwrap_or(0)
+    } else { 0 };
+    let skill_mgr = SkillManager::new();
+    let skill_count = serde_json::from_str::<serde_json::Value>(&skill_mgr.list())
+        .ok()
+        .and_then(|v| v.as_array().map(|a| a.len()))
+        .unwrap_or(0);
+    Json(serde_json::json!({
+        "api_reachable": true,
+        "model": config.model,
+        "provider": config.provider,
+        "last_error": serde_json::Value::Null,
+        "sessions_db_ok": db_ok,
+        "memory_entries": mem_entries,
+        "skills_count": skill_count,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct LogsQuery {
+    limit: Option<usize>,
+    level: Option<String>,
+}
+
+async fn get_logs(
+    State(state): State<AppState>,
+    Query(q): Query<LogsQuery>,
+) -> Json<serde_json::Value> {
+    let buf = state.log_buffer.lock().unwrap();
+    let entries = buf.query(q.level.as_deref(), None, q.limit, None);
+    let entries_json: Vec<serde_json::Value> = entries.iter()
+        .map(|e| serde_json::to_value(e).unwrap_or_default())
+        .collect();
+    Json(serde_json::json!({
+        "entries": entries_json,
+        "total": buf.len(),
+    }))
+}
+
+async fn list_models(
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    let config = state.config.read().await.get().clone();
+    let catalog = providers::all_providers();
+    let mut models = Vec::new();
+    for p in &catalog {
+        for m in &p.models {
+            models.push(serde_json::json!({
+                "id": m.id,
+                "provider": p.id,
+                "name": m.name,
+            }));
+        }
+    }
+    Json(serde_json::json!({
+        "models": models,
+        "current": config.model,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct SwitchModelRequest {
+    model: String,
+}
+
+async fn switch_model(
+    State(state): State<AppState>,
+    Json(req): Json<SwitchModelRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let resolved = providers::resolve_model(&req.model);
+    let (api_url, api_key_env, model_id) = match resolved {
+        Some(r) => r,
+        None => (state.config.read().await.get().api_url.clone(), "MINIMAX_API_KEY".to_string(), req.model.clone()),
+    };
+    let api_key = std::env::var(&api_key_env)
+        .or_else(|_| std::env::var("MINIMAX_API_KEY".to_string()))
+        .unwrap_or_default();
+    let update = ConfigUpdate {
+        model: Some(model_id.clone()),
+        provider: None,
+        api_url: Some(api_url),
+        api_key: if api_key.is_empty() { None } else { Some(api_key) },
+        skin: None,
+    };
+    if let Err(e) = state.config.write().await.update(update) {
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
+            error: e.to_string(),
+        })));
+    }
+    Ok(Json(serde_json::json!({
+        "status": "switched",
+        "model": model_id,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateSkillRequest {
+    name: String,
+    description: String,
+    content: String,
+}
+
+async fn list_skills() -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let skill_mgr = SkillManager::new();
+    let list_str = skill_mgr.list();
+    match serde_json::from_str::<serde_json::Value>(&list_str) {
+        Ok(v) => Ok(Json(v)),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
+            error: format!("Failed to parse skills list: {}", e),
+        }))),
+    }
+}
+
+async fn create_skill(
+    Json(req): Json<CreateSkillRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let mut skill_mgr = SkillManager::new();
+    let result = skill_mgr.create(&req.name, &req.description, &req.content);
+    let parsed: serde_json::Value = serde_json::from_str(&result)
+        .unwrap_or_else(|_| serde_json::json!({"raw": result}));
+    if parsed.get("error").is_some() {
+        Err((StatusCode::BAD_REQUEST, Json(ErrorResponse {
+            error: parsed["error"].as_str().unwrap_or("Unknown error").to_string(),
+        })))
+    } else {
+        Ok(Json(parsed))
+    }
+}
+
+async fn delete_skill(
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let mut skill_mgr = SkillManager::new();
+    let result = skill_mgr.delete(&name);
+    let parsed: serde_json::Value = serde_json::from_str(&result)
+        .unwrap_or_else(|_| serde_json::json!({"raw": result}));
+    if parsed.get("error").is_some() {
+        Err((StatusCode::NOT_FOUND, Json(ErrorResponse {
+            error: parsed["error"].as_str().unwrap_or("Unknown error").to_string(),
+        })))
+    } else {
+        Ok(Json(parsed))
+    }
+}
+
+async fn skills_growth() -> Json<serde_json::Value> {
+    let skill_mgr = SkillManager::new();
+    let list_str = skill_mgr.list();
+    let skills: Vec<serde_json::Value> = serde_json::from_str(&list_str)
+        .ok()
+        .and_then(|v: serde_json::Value| v.get("skills").cloned())
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    let mut by_date: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    for skill in &skills {
+        let date = skill.get("created_at")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let name = skill.get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        by_date.entry(date).or_default().push(name);
+    }
+    let mut result = Vec::new();
+    let mut running = 0;
+    for (date, names) in by_date {
+        running += names.len();
+        result.push(serde_json::json!({
+            "date": date,
+            "count": running,
+            "new_skills": names,
+        }));
+    }
+    Json(serde_json::json!({"skills_over_time": result}))
 }

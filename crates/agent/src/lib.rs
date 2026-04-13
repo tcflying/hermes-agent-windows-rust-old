@@ -20,5 +20,6 @@ pub use prompt_builder::PromptBuilder;
 pub use error_classifier::{classify_error, is_retryable, ClassifiedError, ErrorCategory};
 pub use retry_utils::{RetryConfig, retry_with_backoff, retry_api_call, calculate_delay};
 pub use auxiliary_client::AuxiliaryClient;
+pub use tools::skill_manager::SkillManager;
 
 

@@ -8,6 +8,7 @@ import { SkillsPage } from "./pages/SkillsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { InspectorPage } from "./pages/InspectorPage";
+import { HUDPage } from "./pages/HUDPage";
 
 export default function App() {
   return (
@@ -23,6 +24,7 @@ export default function App() {
           <Route path="settings" element={<SettingsPage />} />
           <Route path="dashboard" element={<DashboardPage />} />
           <Route path="inspector" element={<InspectorPage />} />
+          <Route path="hud" element={<HUDPage />} />
         </Route>
       </Routes>
     </BrowserRouter>

@@ -1,4 +1,5 @@
 pub mod loader;
+pub mod providers;
 pub mod schema;
 
 pub use loader::Config;

@@ -398,3 +398,52 @@ export async function interruptChat(): Promise<void> {
   const res = await fetch(`${API_BASE}/api/chat/interrupt`, { method: "POST" });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
 }
+
+export interface ProviderModel {
+  id: string;
+  name: string;
+  aliases: string[];
+  context_length?: number;
+}
+
+export interface ProviderInfo {
+  id: string;
+  name: string;
+  base_url: string;
+  api_key_env: string;
+  models: ProviderModel[];
+}
+
+export interface ProvidersResponse {
+  providers: ProviderInfo[];
+  credentials: Record<string, boolean>;
+}
+
+export async function getProviders(): Promise<ProvidersResponse> {
+  if (isTauri) {
+    const result = await invoke<unknown>("get_providers_cmd");
+    return result as ProvidersResponse;
+  }
+  const res = await fetch(`${API_BASE}/api/config/providers`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+export interface SwitchModelResponse {
+  status: string;
+  model: string;
+}
+
+export async function switchModel(model: string): Promise<SwitchModelResponse> {
+  if (isTauri) {
+    const result = await invoke<unknown>("switch_model_cmd", { model });
+    return result as SwitchModelResponse;
+  }
+  const res = await fetch(`${API_BASE}/api/models/switch`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model }),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}

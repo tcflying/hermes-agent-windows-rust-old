@@ -55,6 +55,7 @@ pub struct PromptBuilder {
     memory_snapshot: Option<MemorySnapshot>,
     platform: Option<String>,
     working_dir: Option<PathBuf>,
+    skills_content: Option<String>,
 }
 
 impl PromptBuilder {
@@ -63,6 +64,7 @@ impl PromptBuilder {
             memory_snapshot: None,
             platform: None,
             working_dir: None,
+            skills_content: None,
         }
     }
 
@@ -81,10 +83,21 @@ impl PromptBuilder {
         self
     }
 
+    pub fn with_skills_content(mut self, content: String) -> Self {
+        if !content.is_empty() {
+            self.skills_content = Some(content);
+        }
+        self
+    }
+
     pub fn build(&self, tool_schemas: &[serde_json::Value]) -> String {
         let mut sections = Vec::new();
 
         sections.push(DEFAULT_IDENTITY.to_string());
+
+        if let Some(ref skills) = self.skills_content {
+            sections.push(skills.clone());
+        }
 
         let tool_names: Vec<String> = tool_schemas
             .iter()
