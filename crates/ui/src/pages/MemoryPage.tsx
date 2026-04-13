@@ -55,7 +55,7 @@ export function MemoryPage() {
   const [isDirty, setIsDirty] = useState(false);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
 
-  const memoryRoot = "G:\\opencode-project\\hermes-agent";
+  const memoryRoot = ".";
 
   const handleSelect = async (path: string) => {
     if (isDirty && selectedPath) {

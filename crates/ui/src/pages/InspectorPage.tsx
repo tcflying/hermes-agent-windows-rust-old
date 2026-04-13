@@ -1,6 +1,6 @@
 import { Activity, Clock, AlertTriangle, CheckCircle2, XCircle } from "lucide-react";
 import { useState, useEffect } from "react";
-import { listSessions } from "../api";
+import { listSessions, listTools, fetchLogs } from "../api";
 
 interface LogEntry {
   id: string;
@@ -11,15 +11,34 @@ interface LogEntry {
 }
 
 export function InspectorPage() {
-  const [logs, setLogs] = useState<LogEntry[]>([
-    { id: "1", timestamp: new Date().toISOString(), level: "info", message: "Inspector initialized", details: "Hermes Agent v0.1.0" },
-    { id: "2", timestamp: new Date().toISOString(), level: "success", message: "Backend connected", details: "http://localhost:3847" },
-  ]);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
   const [activeTab, setActiveTab] = useState<"logs" | "sessions" | "tools">("logs");
   const [sessions, setSessions] = useState<{ id: string; model?: string; updated_at: string }[]>([]);
+  const [tools, setTools] = useState<{ name: string; description: string }[]>([]);
+
+  useEffect(() => {
+    fetchLogs(50)
+      .then(data => {
+        const entries = (data.entries || []).map((e, i) => ({
+          id: String(i),
+          timestamp: e.timestamp || new Date().toISOString(),
+          level: e.level || "info",
+          message: e.message || "",
+          details: e.details,
+        }));
+        setLogs(entries);
+      })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     listSessions().then(s => setSessions(s)).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    listTools()
+      .then(data => setTools(data.map(t => ({ name: t.name, description: t.description }))))
+      .catch(() => {});
   }, []);
 
   const clearLogs = () => setLogs([]);
@@ -109,30 +128,13 @@ export function InspectorPage() {
 
         {activeTab === "tools" && (
           <div className="tools-panel">
-            <div className="tool-row">
-              <span className="tool-name">terminal</span>
-              <span className="tool-status enabled">enabled</span>
-            </div>
-            <div className="tool-row">
-              <span className="tool-name">file_read</span>
-              <span className="tool-status enabled">enabled</span>
-            </div>
-            <div className="tool-row">
-              <span className="tool-name">file_write</span>
-              <span className="tool-status enabled">enabled</span>
-            </div>
-            <div className="tool-row">
-              <span className="tool-name">web_search</span>
-              <span className="tool-status disabled">disabled</span>
-            </div>
-            <div className="tool-row">
-              <span className="tool-name">browser_navigate</span>
-              <span className="tool-status disabled">disabled</span>
-            </div>
-            <div className="tool-row">
-              <span className="tool-name">code_execute</span>
-              <span className="tool-status disabled">disabled</span>
-            </div>
+            {tools.map(t => (
+              <div key={t.name} className="tool-row">
+                <span className="tool-name">{t.name}</span>
+                <span className="tool-status enabled">enabled</span>
+              </div>
+            ))}
+            {tools.length === 0 && <div className="inspector-empty">No tools loaded</div>}
           </div>
         )}
       </div>

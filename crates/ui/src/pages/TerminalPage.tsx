@@ -5,7 +5,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { execTerminal } from "../api";
 
-const DEFAULT_CWD = "G:\\opencode-project\\hermes-agent";
+const DEFAULT_CWD = ".";
 
 export function TerminalPage() {
   const terminalRef = useRef<HTMLDivElement>(null);

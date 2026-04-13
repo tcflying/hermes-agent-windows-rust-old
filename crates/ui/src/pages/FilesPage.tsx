@@ -4,7 +4,7 @@ import { FileText, Save, FolderOpen } from "lucide-react";
 import { FileTree } from "../components/FileTree";
 import { readFile, writeFile } from "../api";
 
-const DEFAULT_ROOT = "G:\\opencode-project\\hermes-agent";
+const DEFAULT_ROOT = ".";
 
 function getLanguageFromPath(path: string): string {
   const ext = path.split(".").pop()?.toLowerCase() || "";

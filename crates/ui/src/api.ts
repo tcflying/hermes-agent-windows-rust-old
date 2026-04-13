@@ -252,6 +252,28 @@ export async function getSessionMessages(id: string): Promise<SessionMessage[]> 
   return res.json();
 }
 
+export interface LogEntry {
+  timestamp: string;
+  level: string;
+  message: string;
+  details?: string;
+}
+
+export interface LogsResponse {
+  entries: LogEntry[];
+}
+
+export async function fetchLogs(limit?: number): Promise<LogsResponse> {
+  if (isTauri) {
+    const result = await invoke<unknown>("fetch_logs_cmd", { limit: limit || null });
+    return result as LogsResponse;
+  }
+  const url = limit ? `${API_BASE}/api/logs?limit=${limit}` : `${API_BASE}/api/logs`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
 export async function listTools(): Promise<ToolInfo[]> {
   if (isTauri) {
     return invoke<ToolInfo[]>("list_tools_cmd");
