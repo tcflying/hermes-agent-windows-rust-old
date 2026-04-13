@@ -103,7 +103,7 @@ type TabId =
 interface TabDef {
   id: TabId;
   label: string;
-  icon: React.ComponentType<{ size?: number }>;
+  icon: React.ComponentType<{ size?: number | string }>;
 }
 
 const TABS: TabDef[] = [

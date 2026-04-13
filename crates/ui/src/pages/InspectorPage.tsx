@@ -22,7 +22,7 @@ export function InspectorPage() {
         const entries = (data.entries || []).map((e, i) => ({
           id: String(i),
           timestamp: e.timestamp || new Date().toISOString(),
-          level: e.level || "info",
+          level: (e.level as "info" | "warn" | "error" | "success") || "info",
           message: e.message || "",
           details: e.details,
         }));

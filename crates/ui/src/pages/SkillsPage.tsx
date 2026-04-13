@@ -1,4 +1,4 @@
-import { Sparkles, Trash2, Plus, ChevronDown, ChevronUp, BarChart3, X } from "lucide-react";
+import { Sparkles, Trash2, Plus, ChevronUp, BarChart3, X } from "lucide-react";
 import { useState, useEffect, useCallback } from "react";
 
 const API_BASE = "http://localhost:3848";
