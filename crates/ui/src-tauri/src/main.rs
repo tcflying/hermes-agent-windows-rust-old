@@ -281,6 +281,19 @@ async fn list_tools_cmd() -> Result<Vec<serde_json::Value>, String> {
     resp.json::<Vec<serde_json::Value>>().await.map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn interrupt_chat_cmd() -> Result<(), String> {
+    let client = reqwest::Client::new();
+    let resp = client.post(format!("{}/api/chat/interrupt", API_BASE))
+        .send().await.map_err(|e| e.to_string())?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("HTTP {}: {}", status, body));
+    }
+    Ok(())
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -309,6 +322,7 @@ fn main() {
             write_file_cmd,
             exec_terminal_cmd,
             list_tools_cmd,
+            interrupt_chat_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

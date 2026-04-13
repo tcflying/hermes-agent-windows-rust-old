@@ -11,6 +11,7 @@ use hermes_agent::chat::{self, Message};
 use hermes_config::{ConfigLoader, ConfigUpdate};
 use hermes_session::{SessionDb, SessionInfo, SessionMessage};
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -24,6 +25,7 @@ const DEFAULT_API_URL: &str = "https://api.minimaxi.com/v1";
 pub struct AppState {
     pub session_db: Arc<RwLock<SessionDb>>,
     pub config: Arc<RwLock<ConfigLoader>>,
+    pub interrupt_flag: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,7 +72,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/files/read", post(read_file))
         .route("/api/files/write", post(write_file))
         .route("/api/terminal", post(exec_terminal))
+        .route("/api/chat/interrupt", post(chat_interrupt))
         .route("/api/config", get(get_config).put(update_config))
+        .route("/api/memory/read", get(memory_read))
+        .route("/api/memory/action", post(memory_action))
         .layer(cors)
         .with_state(state)
 }
@@ -83,6 +88,7 @@ pub async fn start_server(port: u16) -> Result<()> {
     print!("\x1b[36m  Endpoints: /health /api/chat /api/chat/stream\x1b[0m\n");
     print!("\x1b[36m  Sessions:  /api/sessions /api/sessions/{{id}}\x1b[0m\n");
     print!("\x1b[36m  Tools:     /api/terminal /api/files/* /api/tools\x1b[0m\n");
+    print!("\x1b[36m  Memory:    /api/memory/read /api/memory/action\x1b[0m\n");
     print!("\n");
 
     let db_path = std::env::var("HERMES_DB")
@@ -125,6 +131,7 @@ pub async fn start_server(port: u16) -> Result<()> {
     let state = AppState {
         session_db: Arc::new(RwLock::new(session_db)),
         config: Arc::new(RwLock::new(config_loader)),
+        interrupt_flag: Arc::new(AtomicBool::new(false)),
     };
 
     let app = create_router(state);
@@ -183,7 +190,7 @@ async fn chat(
         })
         .collect();
 
-    match chat::run_conversation(&model, &api_url, &api_key, messages).await {
+    match chat::run_conversation(&model, &api_url, &api_key, messages, Some(state.interrupt_flag.clone()), None).await {
         Ok(response) => {
             state.session_db.write().await.save_message(&session_id, "assistant", &response.content)
                 .await
@@ -248,40 +255,28 @@ async fn chat_stream(
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
+    state.interrupt_flag.store(false, Ordering::SeqCst);
+    let interrupt_flag = state.interrupt_flag.clone();
+
     let session_id_clone = session_id.clone();
     let state_clone = state.clone();
     let sid_log = session_id[..8.min(session_id.len())].to_string();
 
+    let (token_tx, mut token_rx) = tokio::sync::mpsc::channel::<String>(100);
+
+    let tx_clone = tx.clone();
+    let token_tx_clone = token_tx.clone();
     tokio::spawn(async move {
-        let result = chat::run_conversation(&model, &api_url, &api_key, messages).await;
+        let result = chat::run_conversation(&model, &api_url, &api_key, messages, Some(interrupt_flag), Some(token_tx)).await;
 
         match result {
             Ok(response) => {
                 let full_content = response.content;
                 let total_chars_count = full_content.chars().count();
                 let resp_preview = if full_content.len() > 100 { format!("{}...", &full_content[..full_content.ceil_char_boundary(100)]) } else { full_content.clone() };
-                print!("\x1b[32m[stream] session={} sending {} chars | response=\"{}\"\x1b[0m\n", sid_log, total_chars_count, resp_preview);
+                print!("\x1b[32m[stream] session={} total {} chars\x1b[0m\n", sid_log, total_chars_count);
 
-                tx.send(Ok(Event::default().data(format!(r#"{{"session_id":"{}"}}"#, session_id_clone)))).ok();
-
-                let chars: Vec<char> = full_content.chars().collect();
-                let total_chars = chars.len();
-                let chars_per_chunk = 8.max(total_chars / 40);
-                let mut pos = 0;
-                let mut chunks_sent = 0;
-                while pos < total_chars {
-                    let end = (pos + chars_per_chunk).min(total_chars);
-                    let chunk: String = chars[pos..end].iter().collect();
-                    let event_data = serde_json::json!({
-                        "content": chunk,
-                        "done": false
-                    });
-                    if let Ok(event) = serde_json::to_string(&event_data) {
-                        tx.send(Ok(Event::default().data(event))).ok();
-                    }
-                    chunks_sent += 1;
-                    pos = end;
-                }
+                tx_clone.send(Ok(Event::default().data(format!(r#"{{"session_id":"{}"}}"#, session_id_clone)))).ok();
 
                 if !full_content.is_empty() {
                     state_clone.session_db.write().await
@@ -290,8 +285,8 @@ async fn chat_stream(
                         .ok();
                 }
 
-                tx.send(Ok(Event::default().data(r#"{"done":true}"#))).ok();
-                print!("\x1b[32m[stream] session={} ✓ complete ({} chunks, {} chars)\x1b[0m\n", sid_log, chunks_sent, total_chars_count);
+                tx_clone.send(Ok(Event::default().data(r#"{"done":true}"#))).ok();
+                print!("\x1b[32m[stream] session={} ✓ complete ({} chars)\x1b[0m\n", sid_log, total_chars_count);
             }
             Err(e) => {
                 print!("\x1b[31m[stream] session={} ✗ ERROR: {}\x1b[0m\n", sid_log, e);
@@ -299,15 +294,35 @@ async fn chat_stream(
                     "error": e.to_string()
                 });
                 if let Ok(event) = serde_json::to_string(&error_data) {
-                    tx.send(Ok(Event::default().data(event))).ok();
+                    tx_clone.send(Ok(Event::default().data(event))).ok();
                 }
-                tx.send(Ok(Event::default().data(r#"{"done":true}"#))).ok();
+                tx_clone.send(Ok(Event::default().data(r#"{"done":true}"#))).ok();
+            }
+        }
+    });
+
+    tokio::spawn(async move {
+        while let Some(token) = token_rx.recv().await {
+            let event_data = serde_json::json!({
+                "content": token,
+                "done": false
+            });
+            if let Ok(event) = serde_json::to_string(&event_data) {
+                tx.send(Ok(Event::default().data(event))).ok();
             }
         }
     });
 
     let stream = UnboundedReceiverStream::new(rx).map_err(|e: anyhow::Error| anyhow::anyhow!("Channel error: {}", e));
     Ok(Sse::new(stream))
+}
+
+async fn chat_interrupt(
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    state.interrupt_flag.store(true, Ordering::SeqCst);
+    print!("\x1b[33m[interrupt] Conversation interrupt requested\x1b[0m\n");
+    Json(serde_json::json!({"status": "interrupted"}))
 }
 
 async fn list_sessions(
@@ -365,33 +380,8 @@ async fn get_session_messages(
     }
 }
 
-async fn list_tools() -> Json<Vec<ToolInfo>> {
-    Json(vec![
-        ToolInfo {
-            name: "terminal".to_string(),
-            description: "Execute terminal commands".to_string(),
-        },
-        ToolInfo {
-            name: "file_read".to_string(),
-            description: "Read files from the filesystem".to_string(),
-        },
-        ToolInfo {
-            name: "file_write".to_string(),
-            description: "Write content to files".to_string(),
-        },
-        ToolInfo {
-            name: "web_search".to_string(),
-            description: "Search the web for information".to_string(),
-        },
-        ToolInfo {
-            name: "browser_navigate".to_string(),
-            description: "Navigate and interact with a browser".to_string(),
-        },
-        ToolInfo {
-            name: "code_execute".to_string(),
-            description: "Execute code in a sandboxed environment".to_string(),
-        },
-    ])
+async fn list_tools() -> Json<Vec<serde_json::Value>> {
+    Json(hermes_agent::get_tool_definitions())
 }
 
 async fn delete_session(
@@ -594,8 +584,41 @@ struct CreateSessionRequest {
     model: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-struct ToolInfo {
-    name: String,
-    description: String,
+#[derive(Debug, Deserialize)]
+struct MemoryActionRequest {
+    action: String,
+    target: String,
+    content: Option<String>,
+    old_content: Option<String>,
+}
+
+async fn memory_read() -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let mut store = hermes_agent::MemoryStore::new();
+    if let Err(e) = store.load_from_disk() {
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
+            error: format!("Failed to load memory: {}", e),
+        })));
+    }
+    let memory_content = store.execute_action("read", "memory", None, None);
+    let user_content = store.execute_action("read", "user", None, None);
+    Ok(Json(serde_json::json!({
+        "memory": serde_json::from_str::<serde_json::Value>(&memory_content).unwrap_or_default(),
+        "user": serde_json::from_str::<serde_json::Value>(&user_content).unwrap_or_default(),
+    })))
+}
+
+async fn memory_action(
+    Json(req): Json<MemoryActionRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let mut store = hermes_agent::MemoryStore::new();
+    if let Err(e) = store.load_from_disk() {
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
+            error: format!("Failed to load memory: {}", e),
+        })));
+    }
+    let result = store.execute_action(&req.action, &req.target, req.content.as_deref(), req.old_content.as_deref());
+    match serde_json::from_str::<serde_json::Value>(&result) {
+        Ok(v) => Ok(Json(v)),
+        Err(_) => Ok(Json(serde_json::json!({"raw": result}))),
+    }
 }

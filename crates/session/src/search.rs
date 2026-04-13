@@ -1,25 +1,19 @@
+use crate::db::{SessionDb, SessionSearchResult};
 use anyhow::Result;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
-pub struct SessionSearch;
+pub struct SessionSearch {
+    db: Arc<Mutex<SessionDb>>,
+}
 
 impl SessionSearch {
-    pub fn new() -> Self {
-        Self
+    pub fn new(db: Arc<Mutex<SessionDb>>) -> Self {
+        Self { db }
     }
 
-    pub fn search(&self, query: &str, _limit: usize) -> Result<Vec<SearchResult>> {
-        println!("Searching sessions for: {}", query);
-        Ok(vec![])
-    }
-}
-
-pub struct SearchResult {
-    pub session_id: String,
-    pub snippet: String,
-}
-
-impl Default for SessionSearch {
-    fn default() -> Self {
-        Self::new()
+    pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<SessionSearchResult>> {
+        let db = self.db.lock().await;
+        db.search_sessions(query, limit).await
     }
 }

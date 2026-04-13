@@ -132,25 +132,27 @@ export function chatStream(request: ChatRequest, options: ChatStreamOptions): Pr
       let sessionId: string | null = null;
 
       const processBuffer = () => {
-        const newlineIndex = buffer.indexOf("\n");
-        if (newlineIndex === -1) return;
-        
-        const line = buffer.slice(0, newlineIndex);
-        buffer = buffer.slice(newlineIndex + 1);
-        
-        if (line.startsWith("data: ")) {
-          try {
-            const data = JSON.parse(line.slice(6));
-            if (data.session_id && !sessionId) {
-              sessionId = data.session_id;
-            }
-            if (data.done) {
-              onChunk({ content: "", done: true });
-              onDone?.();
-            } else if (data.content !== undefined) {
-              onChunk({ content: data.content || "", done: false });
-            }
-          } catch {}
+        while (true) {
+          const newlineIndex = buffer.indexOf("\n");
+          if (newlineIndex === -1) break;
+          
+          const line = buffer.slice(0, newlineIndex);
+          buffer = buffer.slice(newlineIndex + 1);
+          
+          if (line.startsWith("data: ")) {
+            try {
+              const data = JSON.parse(line.slice(6));
+              if (data.session_id && !sessionId) {
+                sessionId = data.session_id;
+              }
+              if (data.done) {
+                onChunk({ content: "", done: true });
+                onDone?.();
+              } else if (data.content !== undefined) {
+                onChunk({ content: data.content || "", done: false });
+              }
+            } catch {}
+          }
         }
       };
 
@@ -386,4 +388,13 @@ export async function updateConfig(update: Partial<AppConfig>): Promise<AppConfi
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
+}
+
+export async function interruptChat(): Promise<void> {
+  if (isTauri) {
+    await invoke("interrupt_chat_cmd");
+    return;
+  }
+  const res = await fetch(`${API_BASE}/api/chat/interrupt`, { method: "POST" });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
 }

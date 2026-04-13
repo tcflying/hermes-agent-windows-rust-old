@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { chatStream, listSessions, healthCheck, getSessionMessages, deleteSession, getConfig, ChatMessage, SessionInfo } from "../api";
+import { chatStream, listSessions, healthCheck, getSessionMessages, deleteSession, getConfig, interruptChat, ChatMessage, SessionInfo } from "../api";
 import { MarkdownRenderer } from "../components/MarkdownRenderer";
 import { ToolCallList, parseToolCalls } from "../components/ToolCallCard";
-import { Plus, MessageSquare, Copy, Trash2, Check, X } from "lucide-react";
+import { Plus, MessageSquare, Copy, Trash2, Check, X, Square } from "lucide-react";
 
 const MODELS = [
   "MiniMax-M2.7-highspeed",
@@ -482,6 +482,13 @@ export function ChatPage() {
                         thinking... {Math.floor((Date.now() - current.startTime) / 1000)}s
                       </span>
                     )}
+                    <button
+                      style={{ marginLeft: 8, background: "#e53e3e", color: "#fff", border: "none", borderRadius: 4, padding: "2px 8px", cursor: "pointer", fontSize: 11, display: "flex", alignItems: "center", gap: 4 }}
+                      onClick={async () => { await interruptChat(); }}
+                      title="Stop generation"
+                    >
+                      <Square size={10} /> Stop
+                    </button>
                   </div>
                   <div className="message-content">
                     <span className="loading-dots"><span/><span/><span/></span>

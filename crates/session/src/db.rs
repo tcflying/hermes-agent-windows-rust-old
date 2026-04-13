@@ -11,7 +11,7 @@ pub struct SessionDb {
 
 impl SessionDb {
     pub fn new(path: PathBuf) -> Result<Self> {
-        let conn = Connection::open(path)?;
+        let conn = Connection::open(&path)?;
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              CREATE TABLE IF NOT EXISTS sessions (
@@ -27,6 +27,11 @@ impl SessionDb {
                  role TEXT NOT NULL,
                  content TEXT NOT NULL,
                  created_at TEXT NOT NULL
+             );
+             CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
+                 session_id UNINDEXED,
+                 content,
+                 tokenize='porter unicode61'
              );",
         )?;
         Ok(Self { conn: Arc::new(Mutex::new(conn)) })
@@ -37,6 +42,10 @@ impl SessionDb {
         conn.execute(
             "INSERT INTO messages (session_id, role, content, created_at) VALUES (?1, ?2, ?3, datetime('now'))",
             params![session_id, role, content],
+        )?;
+        conn.execute(
+            "INSERT OR REPLACE INTO sessions_fts (rowid, session_id, content) VALUES ((SELECT MAX(rowid) FROM messages WHERE session_id = ?1), ?1, ?2)",
+            params![session_id, content],
         )?;
         Ok(())
     }
@@ -117,7 +126,37 @@ impl SessionDb {
         let conn = self.conn.lock().await;
         conn.execute("DELETE FROM messages WHERE session_id = ?1", params![session_id])?;
         conn.execute("DELETE FROM sessions WHERE id = ?1", params![session_id])?;
+        conn.execute("DELETE FROM sessions_fts WHERE session_id = ?1", params![session_id])?;
         Ok(())
+    }
+
+    pub async fn search_sessions(&self, query: &str, limit: usize) -> Result<Vec<SessionSearchResult>> {
+        let conn = self.conn.lock().await;
+
+        let mut stmt = conn.prepare(
+            "SELECT s.id, s.created_at, s.updated_at, s.model, snippet(sessions_fts, 1, '<mark>', '</mark>', '...', 64) as snippet \
+             FROM sessions_fts \
+             JOIN sessions s ON s.id = sessions_fts.session_id \
+             WHERE sessions_fts MATCH ?1 \
+             ORDER BY rank \
+             LIMIT ?2"
+        )?;
+
+        let results = stmt.query_map(params![query, limit as i64], |row| {
+            Ok(SessionSearchResult {
+                session_id: row.get(0)?,
+                created_at: row.get(1)?,
+                updated_at: row.get(2)?,
+                model: row.get::<_, Option<String>>(3)?,
+                snippet: row.get(4)?,
+            })
+        })?;
+
+        let mut vec = Vec::new();
+        for r in results {
+            vec.push(r?);
+        }
+        Ok(vec)
     }
 }
 
@@ -141,4 +180,13 @@ pub struct SessionInfo {
 pub struct SessionMessage {
     pub role: String,
     pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSearchResult {
+    pub session_id: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub model: Option<String>,
+    pub snippet: String,
 }
