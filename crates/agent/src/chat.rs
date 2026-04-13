@@ -183,10 +183,12 @@ impl ChatAgent {
             let accumulated_content = std::sync::Mutex::new(String::new());
             let accumulated_tool_calls = std::sync::Mutex::new(Vec::<ToolCall>::new());
             let finish_reason = std::sync::Mutex::new(Option::<String>::None);
-            let tool_call_id_buffer = std::sync::Mutex::new(Option::<String>::None);
-            let tool_function_name_buffer = std::sync::Mutex::new(Option::<String>::None);
-            let tool_arguments_buffer = std::sync::Mutex::new(String::new());
-            let in_tool_call = std::sync::Mutex::new(false);
+
+            // Streaming tool call accumulation state
+            let mut current_tc_id: Option<String> = None;
+            let mut current_tc_name: Option<String> = None;
+            let mut current_tc_args: String = String::new();
+            let mut in_tc: bool = false;
 
             let sender_arc2 = sender_arc.clone();
             self.chat_completion_streaming(api_url, api_key, model, &all_messages,
@@ -210,41 +212,56 @@ impl ChatAgent {
                             continue;
                         }
                         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data) {
-                            if let Some(delta) = parsed.get("choices").and_then(|c| c.get(0)) {
-                                if let Some(reason) = delta.get("finish_reason").and_then(|r| r.as_str()) {
-                                    *finish_reason.lock().unwrap() = Some(reason.to_string());
-                                }
-                                if let Some(content) = delta.get("delta").and_then(|d| d.get("content")).and_then(|c| c.as_str()) {
-                                    accumulated_content.lock().unwrap().push_str(content);
-                                }
-                                if let Some(tc_array) = delta.get("delta").and_then(|d| d.get("tool_calls")).and_then(|tc| tc.as_array()) {
-                                    for tc_item in tc_array {
-                                        if let Some(idx) = tc_item.get("index").and_then(|i| i.as_u64()) {
-                                            if idx == 0 && *in_tool_call.lock().unwrap() {
-                                                *in_tool_call.lock().unwrap() = false;
-                                                let name = tool_function_name_buffer.lock().unwrap().take();
-                                                let id = tool_call_id_buffer.lock().unwrap().take();
-                                                let args_str = tool_arguments_buffer.lock().unwrap().trim().to_string();
-                                                tool_arguments_buffer.lock().unwrap().clear();
-                                                if let (Some(name), Some(id)) = (name, id) {
-                                                    accumulated_tool_calls.lock().unwrap().push(ToolCall {
-                                                        id,
-                                                        r#type: None,
-                                                        index: None,
-                                                        function: ToolFunction { name, arguments: args_str },
-                                                    });
+                            if let Some(choices) = parsed.get("choices").and_then(|c| c.as_array()) {
+                                if let Some(choice) = choices.first() {
+                                    // finish_reason
+                                    if let Some(reason) = choice.get("finish_reason").and_then(|r| r.as_str()) {
+                                        *finish_reason.lock().unwrap() = Some(reason.to_string());
+                                    }
+                                    // delta content
+                                    if let Some(delta) = choice.get("delta") {
+                                        if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
+                                            accumulated_content.lock().unwrap().push_str(content);
+                                        }
+                                        // tool_calls in delta
+                                        if let Some(tc_array) = delta.get("tool_calls").and_then(|tc| tc.as_array()) {
+                                            for tc_item in tc_array {
+                                                let this_id = tc_item.get("id").and_then(|v| v.as_str()).map(String::from);
+
+                                                // If id changed, finalize previous tool call
+                                                if in_tc {
+                                                    if let (Some(name), Some(id), Some(cid)) = (current_tc_name.clone(), current_tc_id.clone(), this_id.clone()) {
+                                                        if id != cid {
+                                                            // New tool call started — flush previous
+                                                            let args_str = current_tc_args.trim().to_string();
+                                                            if !name.is_empty() && !id.is_empty() {
+                                                                accumulated_tool_calls.lock().unwrap().push(ToolCall {
+                                                                    id,
+                                                                    r#type: None,
+                                                                    index: None,
+                                                                    function: ToolFunction { name, arguments: args_str },
+                                                                });
+                                                            }
+                                                            current_tc_args.clear();
+                                                            current_tc_name = None;
+                                                            current_tc_id = None;
+                                                            in_tc = false;
+                                                        }
+                                                    }
+                                                }
+
+                                                // Start new tool call
+                                                if let Some(id_val) = tc_item.get("id").and_then(|v| v.as_str()) {
+                                                    current_tc_id = Some(id_val.to_string());
+                                                    in_tc = true;
+                                                }
+                                                if let Some(name_val) = tc_item.get("function").and_then(|f| f.get("name")).and_then(|v| v.as_str()) {
+                                                    current_tc_name = Some(name_val.to_string());
+                                                }
+                                                if let Some(args_val) = tc_item.get("function").and_then(|f| f.get("arguments")).and_then(|v| v.as_str()) {
+                                                    current_tc_args.push_str(args_val);
                                                 }
                                             }
-                                        }
-                                        if let Some(id) = tc_item.get("id").and_then(|v| v.as_str()) {
-                                            *tool_call_id_buffer.lock().unwrap() = Some(id.to_string());
-                                            *in_tool_call.lock().unwrap() = true;
-                                        }
-                                        if let Some(name) = tc_item.get("function").and_then(|f| f.get("name")).and_then(|v| v.as_str()) {
-                                            *tool_function_name_buffer.lock().unwrap() = Some(name.to_string());
-                                        }
-                                        if let Some(args) = tc_item.get("function").and_then(|f| f.get("arguments")).and_then(|v| v.as_str()) {
-                                            tool_arguments_buffer.lock().unwrap().push_str(args);
                                         }
                                     }
                                 }
@@ -256,22 +273,21 @@ impl ChatAgent {
             let mut accumulated_content = accumulated_content.into_inner().unwrap();
             let mut accumulated_tool_calls = accumulated_tool_calls.into_inner().unwrap();
             let finish_reason = finish_reason.into_inner().unwrap();
-            let in_tool_call = in_tool_call.into_inner().unwrap();
-            let tool_function_name_buffer = tool_function_name_buffer.into_inner().unwrap();
-            let tool_call_id_buffer = tool_call_id_buffer.into_inner().unwrap();
-            let tool_arguments_buffer = tool_arguments_buffer.into_inner().unwrap();
 
             println!();
 
-            if in_tool_call {
-                if let (Some(name), Some(id)) = (tool_function_name_buffer, tool_call_id_buffer) {
-                    let args_str = tool_arguments_buffer.trim().to_string();
-                    accumulated_tool_calls.push(ToolCall {
-                        id,
-                        r#type: None,
-                        index: None,
-                        function: ToolFunction { name, arguments: args_str },
-                    });
+            // Flush any remaining tool call
+            if in_tc {
+                if let (Some(name), Some(id)) = (current_tc_name, current_tc_id) {
+                    let args_str = current_tc_args.trim().to_string();
+                    if !name.is_empty() && !id.is_empty() {
+                        accumulated_tool_calls.push(ToolCall {
+                            id,
+                            r#type: None,
+                            index: None,
+                            function: ToolFunction { name, arguments: args_str },
+                        });
+                    }
                 }
             }
 
