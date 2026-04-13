@@ -1,8 +1,8 @@
-# Hermes-RS
+# Hermes-Agent-Windows-Rust
 
-**A high-performance AI agent desktop application built with Rust + React, supporting streaming tool calls, multi-provider LLMs, and full-stack automation.**
+**A high-performance AI agent desktop application for Windows, built with Rust + React. Streaming tool calls, multi-provider LLM support, 19 built-in tools, and a 9-page Web UI.**
 
-> Forked from [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent). A ground-up Rust rewrite targeting Windows desktop with a native GUI.
+> **Based on** [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) (MIT License). This is a ground-up Rust rewrite targeting Windows desktop with native WebView2 GUI.
 
 ---
 

@@ -1,8 +1,8 @@
-# Hermes-RS
+# Hermes-Agent-Windows-Rust
 
-**高性能 AI Agent 桌面应用，基于 Rust + React 构建，支持流式工具调用、多提供商 LLM 和全栈自动化。**
+**面向 Windows 的高性能 AI Agent 桌面应用，基于 Rust + React 构建。流式工具调用、多提供商 LLM 支持、19 个内置工具、9 页 Web UI。**
 
-> Forked from [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)。从零重写，目标 Windows 桌面，带原生 GUI。
+> **基于** [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)（MIT License）。从零重写，目标 Windows 桌面，带原生 WebView2 GUI。
 
 ---
 
