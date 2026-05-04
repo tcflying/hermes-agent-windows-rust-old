@@ -226,7 +226,7 @@ def _graceful_restart_via_sigusr1(pid: int, drain_timeout: float) -> bool:
     while _time.monotonic() < deadline:
         try:
             os.kill(pid, 0)  # signal 0 — probe liveness
-        except ProcessLookupError:
+        except (ProcessLookupError, OSError, SystemError):
             return True
         except PermissionError:
             # Process still exists but we can't signal it.  Treat as alive
@@ -430,7 +430,7 @@ def launch_detached_profile_gateway_restart(profile: str, old_pid: int) -> bool:
         while time.monotonic() < deadline:
             try:
                 os.kill(pid, 0)
-            except ProcessLookupError:
+            except (ProcessLookupError, OSError, SystemError):
                 break
             except PermissionError:
                 pass
@@ -749,7 +749,7 @@ def stop_profile_gateway() -> bool:
         try:
             os.kill(pid, 0)
             _time.sleep(0.5)
-        except (ProcessLookupError, PermissionError):
+        except (ProcessLookupError, PermissionError, OSError, SystemError):
             break
 
     if get_running_pid() is None:
@@ -1967,7 +1967,7 @@ def systemd_restart(system: bool = False):
             try:
                 os.kill(pid, 0)
                 time.sleep(1)
-            except (ProcessLookupError, PermissionError):
+            except (ProcessLookupError, PermissionError, OSError, SystemError):
                 break  # old process is gone
         else:
             print(f"⚠ Old process (PID {pid}) still alive after 90s")

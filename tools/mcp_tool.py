@@ -1136,7 +1136,7 @@ class MCPServerTask:
                     for pid in new_pids:
                         try:
                             os.kill(pid, 0)  # signal 0: probe liveness only
-                        except (ProcessLookupError, PermissionError, OSError):
+                        except (ProcessLookupError, PermissionError, OSError, SystemError):
                             continue  # process already exited — nothing to do
                         _orphan_stdio_pids.add(pid)
 
@@ -3119,7 +3119,7 @@ def _kill_orphaned_mcp_children(include_active: bool = False) -> None:
                 "Force-killed MCP process %d (%s) after SIGTERM timeout",
                 pid, server_name,
             )
-        except (ProcessLookupError, PermissionError, OSError):
+        except (ProcessLookupError, PermissionError, OSError, SystemError):
             pass  # Good — exited after SIGTERM
 
 

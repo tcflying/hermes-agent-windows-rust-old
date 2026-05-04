@@ -10,6 +10,7 @@ const sidebars: SidebarsConfig = {
       items: [
         'getting-started/quickstart',
         'getting-started/installation',
+        'getting-started/windows-native-handoff',
         'getting-started/termux',
         'getting-started/nix-setup',
         'getting-started/updating',

@@ -407,7 +407,7 @@ class ProcessRegistry:
         try:
             os.kill(pid, 0)
             return True
-        except (ProcessLookupError, PermissionError):
+        except (ProcessLookupError, PermissionError, OSError, SystemError):
             return False
 
     def _refresh_detached_session(self, session: Optional[ProcessSession]) -> Optional[ProcessSession]:
@@ -1039,7 +1039,7 @@ class ProcessRegistry:
                         session.process.terminate()
                     else:
                         os.killpg(os.getpgid(session.process.pid), signal.SIGTERM)
-                except (ProcessLookupError, PermissionError):
+                except (ProcessLookupError, PermissionError, OSError, SystemError):
                     session.process.kill()
             elif session.env_ref and session.pid:
                 # Non-local -- kill inside sandbox

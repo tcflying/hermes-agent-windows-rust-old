@@ -13692,7 +13692,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
                 try:
                     os.kill(existing_pid, 0)
                     time.sleep(0.5)
-                except (ProcessLookupError, PermissionError):
+                except (ProcessLookupError, PermissionError, OSError, SystemError):
                     break  # Process is gone
             else:
                 # Still alive after 10s — force kill

@@ -7,11 +7,8 @@ keystrokes can be fed back in.  The only caller today is the
 
 Design constraints:
 
-* **POSIX-only.**  Hermes Agent supports Windows exclusively via WSL, which
-  exposes a native POSIX PTY via ``openpty(3)``.  Native Windows Python
-  has no PTY; :class:`PtyUnavailableError` is raised with a user-readable
-  install/platform message so the dashboard can render a banner instead of
-  crashing.
+* **Cross-platform.** POSIX uses :mod:`ptyprocess`; native Windows uses
+  :mod:`pywinpty` / ConPTY when available.
 * **Zero Node dependency on the server side.**  We use :mod:`ptyprocess`,
   which is a pure-Python wrapper around the OS calls.  The browser talks
   to the same ``hermes --tui`` binary it would launch from the CLI, so
@@ -26,22 +23,33 @@ Design constraints:
 from __future__ import annotations
 
 import errno
-import fcntl
 import os
-import select
 import signal
-import struct
 import sys
-import termios
 import time
+import subprocess
 from typing import Optional, Sequence
 
-try:
-    import ptyprocess  # type: ignore
-    _PTY_AVAILABLE = not sys.platform.startswith("win")
-except ImportError:  # pragma: no cover - dev env without ptyprocess
+if sys.platform.startswith("win"):
+    try:
+        import winpty  # type: ignore
+        _PTY_AVAILABLE = True
+    except ImportError:  # pragma: no cover - optional extra missing
+        winpty = None  # type: ignore
+        _PTY_AVAILABLE = False
     ptyprocess = None  # type: ignore
-    _PTY_AVAILABLE = False
+else:
+    import fcntl
+    import select
+    import struct
+    import termios
+
+    try:
+        import ptyprocess  # type: ignore
+        _PTY_AVAILABLE = True
+    except ImportError:  # pragma: no cover - dev env without ptyprocess
+        ptyprocess = None  # type: ignore
+        _PTY_AVAILABLE = False
 
 
 __all__ = ["PtyBridge", "PtyUnavailableError"]
@@ -50,9 +58,7 @@ __all__ = ["PtyBridge", "PtyUnavailableError"]
 class PtyUnavailableError(RuntimeError):
     """Raised when a PTY cannot be created on this platform.
 
-    Today this means native Windows (no ConPTY bindings) or a dev
-    environment missing the ``ptyprocess`` dependency.  The dashboard
-    surfaces the message to the user as a chat-tab banner.
+    The dashboard surfaces the message to the user as a chat-tab banner.
     """
 
 
@@ -98,16 +104,23 @@ class PtyBridge:
         if not _PTY_AVAILABLE:
             if sys.platform.startswith("win"):
                 raise PtyUnavailableError(
-                    "Pseudo-terminals are unavailable on this platform. "
-                    "Hermes Agent supports Windows only via WSL."
+                    "The `pywinpty` package is missing. Install with: "
+                    "pip install pywinpty (or pip install -e '.[pty]')."
                 )
             if ptyprocess is None:
                 raise PtyUnavailableError(
                     "The `ptyprocess` package is missing. "
                     "Install with: pip install ptyprocess "
                     "(or pip install -e '.[pty]')."
-                )
+            )
             raise PtyUnavailableError("Pseudo-terminals are unavailable.")
+        if sys.platform.startswith("win"):
+            assert winpty is not None
+            pty = winpty.PTY(cols, rows)
+            cmdline = subprocess.list2cmdline(list(argv))
+            pty.spawn(list(argv)[0], cmdline=cmdline, cwd=cwd, env=env)
+            return cls(pty)
+
         # Let caller-supplied env fully override inheritance; if they pass
         # None we inherit the server's env (same semantics as subprocess).
         spawn_env = os.environ.copy() if env is None else env
@@ -146,6 +159,23 @@ class PtyBridge:
         """
         if self._closed:
             return None
+        if sys.platform.startswith("win"):
+            deadline = time.monotonic() + max(timeout, 0)
+            while True:
+                try:
+                    data = self._proc.read(65536, False)
+                except Exception:
+                    return None
+                if data:
+                    if isinstance(data, str):
+                        return data.encode("utf-8", errors="replace")
+                    return bytes(data)
+                if not self.is_alive():
+                    return None
+                if time.monotonic() >= deadline:
+                    return b""
+                time.sleep(0.02)
+
         try:
             readable, _, _ = select.select([self._fd], [], [], timeout)
         except (OSError, ValueError):
@@ -167,6 +197,13 @@ class PtyBridge:
         """Write raw bytes to the PTY master (i.e. the child's stdin)."""
         if self._closed or not data:
             return
+        if sys.platform.startswith("win"):
+            try:
+                self._proc.write(data.decode("utf-8", errors="replace"))
+            except Exception:
+                return
+            return
+
         # os.write can return a short write under load; loop until drained.
         view = memoryview(data)
         while view:
@@ -184,6 +221,13 @@ class PtyBridge:
         """Forward a terminal resize to the child via ``TIOCSWINSZ``."""
         if self._closed:
             return
+        if sys.platform.startswith("win"):
+            try:
+                self._proc.set_size(max(1, cols), max(1, rows))
+            except Exception:
+                pass
+            return
+
         # struct winsize: rows, cols, xpixel, ypixel (all unsigned short)
         winsize = struct.pack("HHHH", max(1, rows), max(1, cols), 0, 0)
         try:
@@ -202,6 +246,17 @@ class PtyBridge:
         if self._closed:
             return
         self._closed = True
+
+        if sys.platform.startswith("win"):
+            try:
+                if self._proc.isalive():
+                    self._proc.write("\x03")
+                    deadline = time.monotonic() + 0.5
+                    while self._proc.isalive() and time.monotonic() < deadline:
+                        time.sleep(0.02)
+            except Exception:
+                pass
+            return
 
         # SIGHUP is the conventional "your terminal went away" signal.
         # We escalate if the child ignores it.

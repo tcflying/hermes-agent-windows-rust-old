@@ -742,10 +742,11 @@ def _emergency_cleanup_all_sessions():
     # Sweep orphans from other crashed hermes processes.  Safe even if we
     # never used the browser — uses owner_pid liveness to avoid reaping
     # daemons owned by other live hermes processes.
-    try:
-        _reap_orphaned_browser_sessions()
-    except Exception as e:
-        logger.debug("Orphan reap on exit failed: %s", e)
+    if sys.platform != "win32":
+        try:
+            _reap_orphaned_browser_sessions()
+        except Exception as e:
+            logger.debug("Orphan reap on exit failed: %s", e)
 
 
 # Register cleanup via atexit only.  Previous versions installed SIGINT/SIGTERM
@@ -805,6 +806,29 @@ def _write_owner_pid(socket_dir: str, session_name: str) -> None:
     except OSError as exc:
         logger.debug("Could not write owner_pid file for %s: %s",
                      session_name, exc)
+
+
+def _is_safe_browser_process_pid(pid: int) -> bool:
+    """Return whether a stale socket PID still looks like a browser daemon."""
+    if pid <= 0 or pid in {os.getpid(), os.getppid()}:
+        return False
+    if sys.platform != "win32":
+        return True
+
+    try:
+        import psutil  # type: ignore
+        proc = psutil.Process(pid)
+        parts = [proc.name(), proc.exe(), " ".join(proc.cmdline())]
+    except Exception:
+        return False
+
+    marker_text = " ".join(part for part in parts if part).lower()
+    return any(marker in marker_text for marker in (
+        "agent-browser",
+        "node.exe",
+        "chrome.exe",
+        "chromium",
+    ))
 
 
 def _reap_orphaned_browser_sessions():
@@ -868,7 +892,7 @@ def _reap_orphaned_browser_sessions():
                 try:
                     os.kill(owner_pid, 0)
                     owner_alive = True
-                except ProcessLookupError:
+                except (ProcessLookupError, OSError, SystemError):
                     owner_alive = False
                 except PermissionError:
                     # Owner exists but we can't signal it (different uid).
@@ -903,7 +927,7 @@ def _reap_orphaned_browser_sessions():
         # Check if the daemon is still alive
         try:
             os.kill(daemon_pid, 0)  # signal 0 = existence check
-        except ProcessLookupError:
+        except (ProcessLookupError, OSError, SystemError):
             # Already dead, just clean up the dir
             shutil.rmtree(socket_dir, ignore_errors=True)
             continue
@@ -912,12 +936,16 @@ def _reap_orphaned_browser_sessions():
             continue
 
         # Daemon is alive and its owner is dead (or legacy + untracked).  Reap.
+        if not _is_safe_browser_process_pid(daemon_pid):
+            shutil.rmtree(socket_dir, ignore_errors=True)
+            continue
+
         try:
             os.kill(daemon_pid, signal.SIGTERM)
             logger.info("Reaped orphaned browser daemon PID %d (session %s)",
                         daemon_pid, session_name)
             reaped += 1
-        except (ProcessLookupError, PermissionError, OSError):
+        except (ProcessLookupError, PermissionError, OSError, SystemError):
             pass
 
         # Clean up the socket directory
@@ -935,11 +963,15 @@ def _browser_cleanup_thread_worker():
     within the BROWSER_SESSION_INACTIVITY_TIMEOUT period.
     On first run, also reaps orphaned sessions from previous process lifetimes.
     """
-    # One-time orphan reap on startup
-    try:
-        _reap_orphaned_browser_sessions()
-    except Exception as e:
-        logger.warning("Orphan reap error: %s", e)
+    # One-time orphan reap on startup.  Native Windows has aggressive PID
+    # reuse and no cheap POSIX-style process identity check, so stale socket
+    # PID files can point at the current Hermes process.  Skip this sweep on
+    # Windows; active sessions are still cleaned up by their owner.
+    if sys.platform != "win32":
+        try:
+            _reap_orphaned_browser_sessions()
+        except Exception as e:
+            logger.warning("Orphan reap error: %s", e)
 
     while _cleanup_running:
         try:
@@ -1301,6 +1333,23 @@ def _find_agent_browser() -> str:
     # (not before the search) to prevent a race where a concurrent thread
     # sees resolved=True but _cached_agent_browser is still None.
 
+    # Prefer the repo-local CLI over a stale global install.  On Windows in
+    # particular, older npm shims can exist in the user profile and shadow the
+    # version pinned by package-lock.json.
+    repo_root = Path(__file__).parent.parent
+    local_bin_dir = repo_root / "node_modules" / ".bin"
+    local_candidates = [
+        local_bin_dir / "agent-browser.cmd",
+        local_bin_dir / "agent-browser",
+    ] if sys.platform == "win32" else [
+        local_bin_dir / "agent-browser",
+    ]
+    for local_bin in local_candidates:
+        if local_bin.exists():
+            _cached_agent_browser = str(local_bin)
+            _agent_browser_resolved = True
+            return _cached_agent_browser
+
     # Check if it's in PATH (global install)
     which_result = shutil.which("agent-browser")
     if which_result:
@@ -1318,14 +1367,6 @@ def _find_agent_browser() -> str:
             _agent_browser_resolved = True
             return which_result
 
-    # Check local node_modules/.bin/ (npm install in repo root)
-    repo_root = Path(__file__).parent.parent
-    local_bin = repo_root / "node_modules" / ".bin" / "agent-browser"
-    if local_bin.exists():
-        _cached_agent_browser = str(local_bin)
-        _agent_browser_resolved = True
-        return _cached_agent_browser
-    
     # Check common npx locations (also search the extended fallback PATH)
     npx_path = shutil.which("npx")
     if not npx_path and extended_path:
@@ -1364,6 +1405,18 @@ def _extract_screenshot_path_from_text(text: str) -> Optional[str]:
                 return path
 
     return None
+
+
+def _windows_command_shim(cmd_parts: List[str], path: str) -> List[str]:
+    """Wrap Windows command shims so subprocess can launch npm-style CLIs."""
+    if sys.platform != "win32" or not cmd_parts:
+        return cmd_parts
+
+    exe = cmd_parts[0]
+    resolved = shutil.which(exe, path=path) or exe
+    if resolved.lower().endswith((".cmd", ".bat")):
+        return ["cmd.exe", "/c", resolved] + cmd_parts[1:]
+    return cmd_parts
 
 
 def _run_browser_command(
@@ -1474,6 +1527,8 @@ def _run_browser_command(
         browser_env["PATH"] = _merge_browser_path(browser_env.get("PATH", ""))
         browser_env["AGENT_BROWSER_SOCKET_DIR"] = task_socket_dir
 
+        cmd_parts = _windows_command_shim(cmd_parts, browser_env.get("PATH", ""))
+
         # Tell the agent-browser daemon to self-terminate after being idle
         # for our configured inactivity timeout.  This is the daemon-side
         # counterpart to our Python-side _cleanup_inactive_browser_sessions
@@ -1493,12 +1548,17 @@ def _run_browser_command(
         stdout_fd = os.open(stdout_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         stderr_fd = os.open(stderr_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
+            popen_kwargs = {}
+            if sys.platform == "win32":
+                popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+
             proc = subprocess.Popen(
                 cmd_parts,
                 stdout=stdout_fd,
                 stderr=stderr_fd,
                 stdin=subprocess.DEVNULL,
                 env=browser_env,
+                **popen_kwargs,
             )
         finally:
             os.close(stdout_fd)
@@ -2677,9 +2737,10 @@ def _cleanup_single_browser_session(task_id: str) -> None:
                 if os.path.isfile(pid_file):
                     try:
                         daemon_pid = int(Path(pid_file).read_text().strip())
-                        os.kill(daemon_pid, signal.SIGTERM)
-                        logger.debug("Killed daemon pid %s for %s", daemon_pid, session_name)
-                    except (ProcessLookupError, ValueError, PermissionError, OSError):
+                        if _is_safe_browser_process_pid(daemon_pid):
+                            os.kill(daemon_pid, signal.SIGTERM)
+                            logger.debug("Killed daemon pid %s for %s", daemon_pid, session_name)
+                    except (ProcessLookupError, ValueError, PermissionError, OSError, SystemError):
                         logger.debug("Could not kill daemon pid for %s (already dead or inaccessible)", session_name)
                 shutil.rmtree(socket_dir, ignore_errors=True)
         

@@ -505,7 +505,7 @@ def acquire_scoped_lock(scope: str, identity: str, metadata: Optional[dict[str, 
         if not stale:
             try:
                 os.kill(existing_pid, 0)
-            except (ProcessLookupError, PermissionError, OSError):
+            except (ProcessLookupError, PermissionError, OSError, SystemError):
                 # Windows raises OSError with WinError 87 for invalid pid check
                 stale = True
             else:
@@ -779,7 +779,7 @@ def get_running_pid(
             if _record_looks_like_gateway(record):
                 return pid
             continue
-        except OSError:
+        except (OSError, SystemError):
             # Windows raises OSError with WinError 87 for an invalid pid
             # (process is definitely gone). Treat as "process doesn't exist".
             continue
