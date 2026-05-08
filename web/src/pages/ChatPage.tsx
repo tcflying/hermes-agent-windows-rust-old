@@ -148,12 +148,11 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       : false,
   );
 
-  // The dashboard keeps ChatPage mounted persistently so the PTY survives tab
-  // switches. That is great for ordinary /chat navigation, but it means query
-  // param changes do NOT remount the component. Resume-in-chat from the
-  // Sessions page relies on `/chat?resume=<id>` changing at runtime, so we must
-  // treat the current resume target as part of the PTY identity and rebuild the
-  // terminal session when it changes.
+  // The dashboard keeps ChatPage mounted persistently, so query param changes do
+  // NOT remount the component. Resume-in-chat from the Sessions page relies on
+  // `/chat?resume=<id>` changing at runtime, so we must treat the current resume
+  // target as part of the PTY identity and rebuild the terminal session when it
+  // changes.
   const resumeParam = searchParams.get("resume");
   const channel = useMemo(() => generateChannelId(), [resumeParam]);
 
@@ -265,6 +264,8 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   };
 
   useEffect(() => {
+    if (!isActive) return;
+
     const host = hostRef.current;
     if (!host) return;
 
@@ -657,7 +658,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
         copyResetRef.current = null;
       }
     };
-  }, [channel, resumeParam]);
+  }, [channel, resumeParam, isActive]);
 
   // When the user returns to the chat tab (isActive: false → true), the
   // terminal host just transitioned from display:none to display:flex.

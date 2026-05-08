@@ -23,14 +23,19 @@ Design constraints:
 from __future__ import annotations
 
 import errno
+import logging
 import os
 import signal
 import sys
 import time
 import subprocess
+import threading
 from typing import Optional, Sequence
 
 if sys.platform.startswith("win"):
+    import ctypes
+    from ctypes import wintypes
+
     try:
         import winpty  # type: ignore
         _PTY_AVAILABLE = True
@@ -54,10 +59,105 @@ else:
 
 __all__ = ["PtyBridge", "PtyUnavailableError"]
 
+_log = logging.getLogger(__name__)
+
 
 def _windows_env_block(env: dict) -> str:
     """Convert an env mapping into the NUL-delimited block pywinpty expects."""
     return "".join(f"{key}={value}\0" for key, value in env.items()) + "\0"
+
+
+if sys.platform.startswith("win"):
+    TH32CS_SNAPPROCESS = 0x00000002
+    INVALID_HANDLE_VALUE = wintypes.HANDLE(-1).value
+    SW_HIDE = 0
+
+    class _PROCESSENTRY32(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.POINTER(wintypes.ULONG)),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", wintypes.LONG),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", wintypes.WCHAR * 260),
+        ]
+
+    def _windows_child_processes(parent_pid: int) -> dict[int, str]:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        if snapshot == INVALID_HANDLE_VALUE:
+            return {}
+        try:
+            entry = _PROCESSENTRY32()
+            entry.dwSize = ctypes.sizeof(_PROCESSENTRY32)
+            processes: dict[int, str] = {}
+            if not kernel32.Process32FirstW(snapshot, ctypes.byref(entry)):
+                return processes
+            while True:
+                if int(entry.th32ParentProcessID) == parent_pid:
+                    processes[int(entry.th32ProcessID)] = str(entry.szExeFile).lower()
+                if not kernel32.Process32NextW(snapshot, ctypes.byref(entry)):
+                    return processes
+        finally:
+            kernel32.CloseHandle(snapshot)
+
+    def _windows_child_pids(parent_pid: int) -> set[int]:
+        return set(_windows_child_processes(parent_pid))
+
+    def _windows_hide_console_windows(pids: set[int]) -> None:
+        if not pids:
+            return
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+
+        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def enum_proc(hwnd, _lparam):
+            window_pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(window_pid))
+            if int(window_pid.value) in pids and user32.IsWindowVisible(hwnd):
+                user32.ShowWindow(hwnd, SW_HIDE)
+            return True
+
+        user32.EnumWindows(enum_proc, 0)
+
+    def _windows_hide_pty_console_windows(parent_pid: int, child_pid: int) -> None:
+        """Best-effort hide for pywinpty's transient console host windows."""
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            pids = {child_pid} if child_pid else set()
+            pids.update(_windows_child_pids(parent_pid))
+            _windows_hide_console_windows(pids)
+            time.sleep(0.1)
+
+    def _windows_taskkill_tree(pid: int) -> None:
+        if not pid:
+            return
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                check=False,
+            )
+        except Exception:
+            _log.debug("Failed to taskkill Windows PTY process tree", exc_info=True)
+
+    def _windows_cleanup_pty_children(parent_pid: int) -> None:
+        helper_names = {
+            "cmd.exe",
+            "conhost.exe",
+            "node.exe",
+            "python.exe",
+            "pythonw.exe",
+        }
+        for pid, exe_name in _windows_child_processes(parent_pid).items():
+            if exe_name in helper_names:
+                _windows_taskkill_tree(pid)
 
 
 class PtyUnavailableError(RuntimeError):
@@ -78,10 +178,18 @@ class PtyBridge:
     ``os.write`` on the master fd, which is safe.
     """
 
-    def __init__(self, proc: "ptyprocess.PtyProcess"):  # type: ignore[name-defined]
+    def __init__(
+        self,
+        proc: "ptyprocess.PtyProcess",  # type: ignore[name-defined]
+        *,
+        windows_child_pid: int = 0,
+        windows_parent_pid: int = 0,
+    ):
         self._proc = proc
         self._fd: int = proc.fd
         self._closed = False
+        self._windows_child_pid = windows_child_pid
+        self._windows_parent_pid = windows_parent_pid
 
     # -- lifecycle --------------------------------------------------------
 
@@ -121,7 +229,8 @@ class PtyBridge:
             raise PtyUnavailableError("Pseudo-terminals are unavailable.")
         if sys.platform.startswith("win"):
             assert winpty is not None
-            pty = winpty.PTY(cols, rows)
+            parent_pid = os.getpid()
+            pty = winpty.PTY(cols, rows, backend=winpty.Backend.ConPTY)
             cmdline = subprocess.list2cmdline(list(argv))
             spawn_env = (os.environ.copy() if env is None else env.copy())
             if not spawn_env.get("TERM"):
@@ -132,7 +241,24 @@ class PtyBridge:
                 cwd=cwd,
                 env=_windows_env_block(spawn_env),
             )
-            return cls(pty)
+            child_pid = int(pty.pid or 0)
+            _log.info(
+                "Spawned Windows dashboard PTY child pid=%s argv=%r cwd=%r",
+                child_pid,
+                list(argv),
+                cwd,
+            )
+            threading.Thread(
+                target=_windows_hide_pty_console_windows,
+                args=(parent_pid, child_pid),
+                name="hermes-pty-hide-console",
+                daemon=True,
+            ).start()
+            return cls(
+                pty,
+                windows_child_pid=child_pid,
+                windows_parent_pid=parent_pid,
+            )
 
         # PTY-hosted programs expect TERM to describe the terminal type.
         # CI often runs without TERM in the parent process, which makes
@@ -274,6 +400,12 @@ class PtyBridge:
                         time.sleep(0.02)
             except Exception:
                 pass
+            try:
+                if self._proc.isalive():
+                    _windows_taskkill_tree(self._windows_child_pid or int(self._proc.pid or 0))
+            except Exception:
+                _windows_taskkill_tree(self._windows_child_pid)
+            _windows_cleanup_pty_children(self._windows_parent_pid)
             return
 
         # SIGHUP is the conventional "your terminal went away" signal.
