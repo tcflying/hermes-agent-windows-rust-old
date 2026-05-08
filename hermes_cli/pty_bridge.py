@@ -55,6 +55,11 @@ else:
 __all__ = ["PtyBridge", "PtyUnavailableError"]
 
 
+def _windows_env_block(env: dict) -> str:
+    """Convert an env mapping into the NUL-delimited block pywinpty expects."""
+    return "".join(f"{key}={value}\0" for key, value in env.items()) + "\0"
+
+
 class PtyUnavailableError(RuntimeError):
     """Raised when a PTY cannot be created on this platform.
 
@@ -118,12 +123,25 @@ class PtyBridge:
             assert winpty is not None
             pty = winpty.PTY(cols, rows)
             cmdline = subprocess.list2cmdline(list(argv))
-            pty.spawn(list(argv)[0], cmdline=cmdline, cwd=cwd, env=env)
+            spawn_env = (os.environ.copy() if env is None else env.copy())
+            if not spawn_env.get("TERM"):
+                spawn_env["TERM"] = "xterm-256color"
+            pty.spawn(
+                list(argv)[0],
+                cmdline=cmdline,
+                cwd=cwd,
+                env=_windows_env_block(spawn_env),
+            )
             return cls(pty)
 
-        # Let caller-supplied env fully override inheritance; if they pass
-        # None we inherit the server's env (same semantics as subprocess).
-        spawn_env = os.environ.copy() if env is None else env
+        # PTY-hosted programs expect TERM to describe the terminal type.
+        # CI often runs without TERM in the parent process, which makes
+        # simple terminal probes like `tput cols` fail before winsize reads.
+        # Preserve explicit caller overrides, but backfill a sensible default
+        # when TERM is missing or blank.
+        spawn_env = (os.environ.copy() if env is None else env.copy())
+        if not spawn_env.get("TERM"):
+            spawn_env["TERM"] = "xterm-256color"
         proc = ptyprocess.PtyProcess.spawn(  # type: ignore[union-attr]
             list(argv),
             cwd=cwd,
