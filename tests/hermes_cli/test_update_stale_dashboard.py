@@ -392,3 +392,50 @@ class TestWindowsWmicEncoding:
             )
             # Must not raise.
             assert _find_stale_dashboard_pids() == []
+
+    def test_wmic_ignores_shell_wrappers_containing_dashboard_command(self, monkeypatch):
+        """Windows scans must not count PowerShell/rtk parents that merely
+        embed the dashboard command in their -Command argument."""
+        monkeypatch.setattr(sys, "platform", "win32")
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout=(
+                    "CommandLine=\"C:\\Program Files\\PowerShell\\7\\pwsh.exe\" "
+                    "-Command \"python -m hermes_cli.main dashboard --port 9119\"\n"
+                    "ProcessId=111\n"
+                    "CommandLine=\"C:\\Users\\me\\.local\\bin\\rtk.exe\" pwsh "
+                    "-Command \"python -m hermes_cli.main dashboard --port 9119\"\n"
+                    "ProcessId=222\n"
+                    "CommandLine=\"C:\\Python311\\python.exe\" -m hermes_cli.main "
+                    "dashboard --port 9119\n"
+                    "ProcessId=333\n"
+                    "CommandLine=\"C:\\Users\\me\\venv\\Scripts\\hermes.exe\" "
+                    "dashboard --port 9120\n"
+                    "ProcessId=444\n"
+                ),
+                stderr="",
+            )
+            assert sorted(_find_stale_dashboard_pids()) == [333, 444]
+
+    def test_wmic_ignores_dashboard_management_commands(self, monkeypatch):
+        """Short-lived --status/--stop invocations must not be reported as
+        running dashboard servers."""
+        monkeypatch.setattr(sys, "platform", "win32")
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout=(
+                    "CommandLine=\"C:\\Python311\\python.exe\" -m hermes_cli.main "
+                    "dashboard --status\n"
+                    "ProcessId=111\n"
+                    "CommandLine=\"C:\\Python311\\python.exe\" -m hermes_cli.main "
+                    "dashboard --stop\n"
+                    "ProcessId=222\n"
+                    "CommandLine=\"C:\\Python311\\python.exe\" -m hermes_cli.main "
+                    "dashboard --port 9119\n"
+                    "ProcessId=333\n"
+                ),
+                stderr="",
+            )
+            assert _find_stale_dashboard_pids() == [333]

@@ -1,2 +1,5 @@
 # Auto-generated files — collapse diffs and exclude from language stats
 web/package-lock.json linguist-generated=true
+
+# Keep executable scripts runnable from Git Bash/MSYS on native Windows.
+*.sh text eol=lf

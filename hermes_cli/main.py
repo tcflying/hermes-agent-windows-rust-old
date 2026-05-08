@@ -5598,9 +5598,33 @@ def _find_stale_dashboard_pids() -> list[int]:
     """
     patterns = [
         "hermes dashboard",
+        "hermes.exe dashboard",
         "hermes_cli.main dashboard",
         "hermes_cli/main.py dashboard",
     ]
+
+    def _looks_like_dashboard_process(command: str) -> bool:
+        normalized = command.replace("\\", "/").lower()
+        command_body = normalized.replace('"', "")
+        if not any(p in command_body for p in patterns):
+            return False
+        if " --status" in command_body or " --stop" in command_body:
+            return False
+
+        if sys.platform == "win32":
+            # PowerShell/cmd wrappers used by Start-Process, rtk, and tests
+            # often contain the child command verbatim in a "-Command" string.
+            # Count only the actual hermes/python process so --status/--stop
+            # do not report or kill the parent shell stack.
+            stripped = normalized.lstrip()
+            if stripped.startswith('"'):
+                image = stripped.split('"', 2)[1]
+            else:
+                image = stripped.split(maxsplit=1)[0]
+            if image.endswith(("pwsh.exe", "powershell.exe", "cmd.exe", "rtk.exe")):
+                return False
+
+        return True
     self_pid = os.getpid()
     dashboard_pids: list[int] = []
 
@@ -5631,7 +5655,7 @@ def _find_stale_dashboard_pids() -> list[int]:
                 elif line.startswith("ProcessId="):
                     pid_str = line[len("ProcessId=") :]
                     if (
-                        any(p in current_cmd for p in patterns)
+                        _looks_like_dashboard_process(current_cmd)
                         and int(pid_str) != self_pid
                     ):
                         try:
@@ -5664,7 +5688,7 @@ def _find_stale_dashboard_pids() -> list[int]:
                     except ValueError:
                         continue
                     command = parts[1]
-                    if any(p in command for p in patterns) and pid != self_pid:
+                    if _looks_like_dashboard_process(command) and pid != self_pid:
                         dashboard_pids.append(pid)
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return []
