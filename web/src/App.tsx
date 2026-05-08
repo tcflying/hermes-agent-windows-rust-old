@@ -50,6 +50,7 @@ import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { Typography } from "@/components/NouiTypography";
 import { cn } from "@/lib/utils";
 import { Backdrop } from "@/components/Backdrop";
+import { BottomLogDock } from "@/components/BottomLogDock";
 import { SidebarFooter } from "@/components/SidebarFooter";
 import { SidebarStatusStrip } from "@/components/SidebarStatusStrip";
 import { PageHeaderProvider } from "@/contexts/PageHeaderProvider";
@@ -579,8 +580,8 @@ export default function App() {
                 "relative z-2 flex min-w-0 min-h-0 flex-1 flex-col",
                 "px-3 sm:px-6",
                 isChatRoute
-                  ? "pb-3 pt-1 sm:pb-4 sm:pt-2 lg:pt-4"
-                  : "pt-2 sm:pt-4 lg:pt-6 pb-4 sm:pb-8",
+                  ? "pb-16 pt-1 sm:pt-2 lg:pt-4"
+                  : "pt-2 sm:pt-4 lg:pt-6 pb-16",
                 isDocsRoute && "min-h-0 flex-1",
               )}
             >
@@ -639,6 +640,7 @@ export default function App() {
       </div>
 
       <PluginSlot name="overlay" />
+      <BottomLogDock />
     </div>
   );
 }
