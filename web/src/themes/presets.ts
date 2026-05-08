@@ -40,8 +40,104 @@ const DEFAULT_LAYOUT: ThemeLayout = {
 
 export const defaultTheme: DashboardTheme = {
   name: "default",
-  label: "Hermes Teal",
-  description: "Classic dark teal — the canonical Hermes look",
+  label: "Workbench",
+  description: "Quiet Paperclip-inspired control panel — dense, stable, readable",
+  palette: {
+    background: { hex: "#101114", alpha: 1 },
+    midground: { hex: "#f4f4f5", alpha: 1 },
+    foreground: { hex: "#ffffff", alpha: 0 },
+    warmGlow: "rgba(245, 158, 11, 0.12)",
+    noiseOpacity: 0.18,
+  },
+  typography: {
+    ...DEFAULT_TYPOGRAPHY,
+    fontSans:
+      '"Aptos", "Segoe UI Variable", "Segoe UI", "Helvetica Neue", sans-serif',
+    fontMono:
+      '"Cascadia Code", "JetBrains Mono", "SF Mono", Consolas, monospace',
+    baseSize: "14px",
+    lineHeight: "1.5",
+  },
+  layout: {
+    radius: "0.375rem",
+    density: "compact",
+  },
+  colorOverrides: {
+    card: "#17181c",
+    cardForeground: "#f4f4f5",
+    popover: "#18191e",
+    popoverForeground: "#f4f4f5",
+    primary: "#f59e0b",
+    primaryForeground: "#111111",
+    secondary: "#22242a",
+    secondaryForeground: "#e4e4e7",
+    muted: "#202126",
+    mutedForeground: "#a1a1aa",
+    accent: "#272a31",
+    accentForeground: "#f4f4f5",
+    success: "#22c55e",
+    warning: "#f59e0b",
+    destructive: "#ef4444",
+    border: "rgba(244,244,245,0.12)",
+    input: "rgba(244,244,245,0.16)",
+    ring: "#f59e0b",
+  },
+  componentStyles: {
+    backdrop: {
+      fillerOpacity: "0",
+      fillerBlendMode: "normal",
+    },
+    sidebar: {
+      background:
+        "linear-gradient(180deg, rgba(16,17,20,0.98) 0%, rgba(13,14,17,0.98) 100%)",
+    },
+    card: {
+      background:
+        "linear-gradient(180deg, rgba(255,255,255,0.035) 0%, rgba(255,255,255,0.015) 100%), var(--color-card)",
+      boxShadow: "0 1px 0 rgba(255,255,255,0.04) inset",
+    },
+  },
+  customCSS: `
+    :root {
+      color-scheme: dark;
+    }
+    body {
+      background:
+        radial-gradient(circle at 18% 0%, rgba(245,158,11,0.10), transparent 28rem),
+        linear-gradient(180deg, #101114 0%, #0d0e11 100%);
+    }
+    [data-layout-variant] {
+      text-transform: none;
+    }
+    html body .font-mondwest,
+    html body .font-expanded,
+    html body .font-compressed,
+    html body .font-courier {
+      font-family: var(--theme-font-sans);
+      letter-spacing: 0;
+    }
+    html body aside .font-mondwest,
+    html body aside .font-expanded {
+      letter-spacing: 0.025em;
+    }
+    aside nav a {
+      text-transform: none;
+      font-size: 0.88rem;
+      letter-spacing: 0;
+    }
+    aside nav a[aria-current="page"] {
+      background: rgba(245,158,11,0.10);
+    }
+    table, input, textarea, select, button {
+      font-feature-settings: "tnum" 1, "cv02" 1;
+    }
+  `,
+};
+
+export const hermesClassicTheme: DashboardTheme = {
+  name: "hermes-classic",
+  label: "Hermes Classic",
+  description: "Classic dark teal — the original Hermes look",
   palette: {
     background: { hex: "#041c1c", alpha: 1 },
     midground: { hex: "#ffe6cb", alpha: 1 },
@@ -190,23 +286,27 @@ export const roseTheme: DashboardTheme = {
  */
 export const defaultLargeTheme: DashboardTheme = {
   name: "default-large",
-  label: "Hermes Teal (Large)",
-  description: "Hermes Teal with bigger fonts and roomier spacing",
+  label: "Workbench Large",
+  description: "Workbench with bigger fonts and roomier spacing",
   palette: defaultTheme.palette,
   typography: {
-    ...DEFAULT_TYPOGRAPHY,
-    baseSize: "18px",
-    lineHeight: "1.65",
+    ...defaultTheme.typography,
+    baseSize: "17px",
+    lineHeight: "1.6",
   },
   layout: {
-    ...DEFAULT_LAYOUT,
+    ...defaultTheme.layout,
     density: "spacious",
   },
+  colorOverrides: defaultTheme.colorOverrides,
+  componentStyles: defaultTheme.componentStyles,
+  customCSS: defaultTheme.customCSS,
 };
 
 export const BUILTIN_THEMES: Record<string, DashboardTheme> = {
   default: defaultTheme,
   "default-large": defaultLargeTheme,
+  "hermes-classic": hermesClassicTheme,
   midnight: midnightTheme,
   ember: emberTheme,
   mono: monoTheme,

@@ -19,7 +19,10 @@ import { cn } from "@/lib/utils";
  * `dropUp` so the menu opens above the trigger instead of clipping below
  * the viewport.
  */
-export function ThemeSwitcher({ dropUp = false }: ThemeSwitcherProps) {
+export function ThemeSwitcher({
+  dropUp = false,
+  prominent = false,
+}: ThemeSwitcherProps) {
   const { themeName, availableThemes, setTheme } = useTheme();
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
@@ -56,7 +59,12 @@ export function ThemeSwitcher({ dropUp = false }: ThemeSwitcherProps) {
       <Button
         ghost
         onClick={() => setOpen((o) => !o)}
-        className="px-2 py-1 normal-case tracking-normal font-normal text-xs text-muted-foreground hover:text-foreground"
+        className={cn(
+          "normal-case tracking-normal font-normal text-muted-foreground hover:text-foreground",
+          prominent
+            ? "h-9 gap-2 rounded-md border border-border bg-card/85 px-3 text-xs shadow-sm backdrop-blur-sm"
+            : "px-2 py-1 text-xs",
+        )}
         title={t.theme?.switchTheme ?? "Switch theme"}
         aria-label={t.theme?.switchTheme ?? "Switch theme"}
         aria-expanded={open}
@@ -67,9 +75,12 @@ export function ThemeSwitcher({ dropUp = false }: ThemeSwitcherProps) {
 
           <Typography
             mondwest
-            className="hidden sm:inline tracking-wide uppercase text-[0.65rem]"
+            className={cn(
+              "tracking-wide uppercase",
+              prominent ? "inline text-[0.72rem]" : "hidden sm:inline text-[0.65rem]",
+            )}
           >
-            {label}
+            {prominent ? `UI: ${label}` : label}
           </Typography>
         </span>
       </Button>
@@ -81,8 +92,8 @@ export function ThemeSwitcher({ dropUp = false }: ThemeSwitcherProps) {
           className={cn(
             "absolute z-50 min-w-[240px]",
             dropUp ? "left-0 bottom-full mb-1" : "right-0 top-full mt-1",
-            "border border-current/20 bg-background-base/95 backdrop-blur-sm",
-            "shadow-[0_12px_32px_-8px_rgba(0,0,0,0.6)]",
+            "border border-border bg-popover/95 text-popover-foreground backdrop-blur-sm",
+            "shadow-[0_18px_45px_-18px_rgba(0,0,0,0.8)]",
           )}
         >
           <div className="border-b border-current/20 px-3 py-2">
@@ -170,4 +181,5 @@ function PlaceholderSwatch() {
 
 interface ThemeSwitcherProps {
   dropUp?: boolean;
+  prominent?: boolean;
 }

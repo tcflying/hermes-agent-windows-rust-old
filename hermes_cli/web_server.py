@@ -3431,8 +3431,9 @@ def mount_spa(application: FastAPI):
 # Built-in dashboard themes — label + description only.  The actual color
 # definitions live in the frontend (web/src/themes/presets.ts).
 _BUILTIN_DASHBOARD_THEMES = [
-    {"name": "default",       "label": "Hermes Teal",         "description": "Classic dark teal — the canonical Hermes look"},
-    {"name": "default-large", "label": "Hermes Teal (Large)", "description": "Hermes Teal with bigger fonts and roomier spacing"},
+    {"name": "default",       "label": "Workbench",          "description": "Quiet Paperclip-inspired control panel — dense, stable, readable"},
+    {"name": "default-large", "label": "Workbench Large",    "description": "Workbench with bigger fonts and roomier spacing"},
+    {"name": "hermes-classic", "label": "Hermes Classic",    "description": "Classic dark teal — the original Hermes look"},
     {"name": "midnight",      "label": "Midnight",            "description": "Deep blue-violet with cool accents"},
     {"name": "ember",     "label": "Ember",          "description": "Warm crimson and bronze — forge vibes"},
     {"name": "mono",      "label": "Mono",           "description": "Clean grayscale — minimal and focused"},

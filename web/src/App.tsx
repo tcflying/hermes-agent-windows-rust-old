@@ -399,7 +399,7 @@ export default function App() {
   return (
     <div
       data-layout-variant={layoutVariant}
-      className="font-mondwest flex h-dvh max-h-dvh min-h-0 flex-col overflow-hidden bg-black uppercase text-midground antialiased"
+      className="font-sans flex h-dvh max-h-dvh min-h-0 flex-col overflow-hidden bg-black text-midground antialiased"
     >
       <SelectionSwitcher />
       <Backdrop />
@@ -436,6 +436,10 @@ export default function App() {
         >
           {t.app.brand}
         </Typography>
+
+        <div className="ml-auto">
+          <ThemeSwitcher prominent />
+        </div>
       </header>
 
       {mobileOpen && (
@@ -451,6 +455,10 @@ export default function App() {
       )}
 
       <PluginSlot name="header-banner" />
+
+      <div className="fixed right-4 top-4 z-40 hidden lg:block">
+        <ThemeSwitcher prominent />
+      </div>
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden pt-12 lg:pt-0">
         <div className="flex min-h-0 min-w-0 flex-1">
