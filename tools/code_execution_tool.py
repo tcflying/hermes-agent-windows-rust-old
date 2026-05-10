@@ -24,8 +24,7 @@ Architecture (two transports):
 In both cases, only the script's stdout is returned to the LLM; intermediate
 tool results never enter the context window.
 
-Platform: Linux / macOS use Unix domain sockets for local execution. Native
-Windows uses a loopback TCP socket for the same local RPC protocol.
+Platform: Linux / macOS only (Unix domain sockets for local). Disabled on Windows.
 Remote execution additionally requires Python 3 in the terminal backend.
 """
 
@@ -48,7 +47,10 @@ import uuid
 _IS_WINDOWS = platform.system() == "Windows"
 from typing import Any, Dict, List, Optional
 
-# Availability gate: UDS requires a POSIX OS
+# Availability gate.  On Windows we fall back to loopback TCP for the
+# sandbox RPC transport (AF_UNIX is unreliable on Windows Python) — see
+# ``_use_tcp_rpc`` in ``_execute_local`` below.  That makes execute_code
+# available on every platform Hermes itself runs on.
 logger = logging.getLogger(__name__)
 
 SANDBOX_AVAILABLE = True
@@ -71,9 +73,91 @@ DEFAULT_MAX_TOOL_CALLS = 50
 MAX_STDOUT_BYTES = 50_000    # 50 KB
 MAX_STDERR_BYTES = 10_000    # 10 KB
 
+# Environment variable scrubbing rules (shared between the local + remote
+# backends).  Secret-substring block is applied first; anything left must
+# match either a safe prefix or, on Windows, an OS-essential name.
+_SAFE_ENV_PREFIXES = ("PATH", "HOME", "USER", "LANG", "LC_", "TERM",
+                      "TMPDIR", "TMP", "TEMP", "SHELL", "LOGNAME",
+                      "XDG_", "PYTHONPATH", "VIRTUAL_ENV", "CONDA",
+                      "HERMES_")
+_SECRET_SUBSTRINGS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL",
+                      "PASSWD", "AUTH")
+
+# Windows-only: a handful of variables are required by the OS/CRT itself.
+# Without them, even stdlib calls like ``socket.socket()`` fail with
+# WinError 10106 (Winsock can't locate mswsock.dll) and ``subprocess``
+# can't resolve cmd.exe.  These are well-known OS paths, not secrets, so
+# we allow them through by exact name.  The _SECRET_SUBSTRINGS block
+# still runs as a safety net (none of these names match those substrings).
+_WINDOWS_ESSENTIAL_ENV_VARS = frozenset({
+    "SYSTEMROOT",       # %SYSTEMROOT%\System32 — Winsock needs this
+    "SYSTEMDRIVE",      # C: (or wherever Windows lives)
+    "WINDIR",           # usually same as SYSTEMROOT
+    "COMSPEC",          # cmd.exe path — subprocess shell=True needs it
+    "PATHEXT",          # .COM;.EXE;.BAT;... — shell lookup
+    "OS",               # "Windows_NT" — some tools gate on this
+    "PROCESSOR_ARCHITECTURE",
+    "NUMBER_OF_PROCESSORS",
+    "PUBLIC",           # C:\Users\Public
+    "ALLUSERSPROFILE",  # C:\ProgramData — some stdlib paths use it
+    "PROGRAMDATA",      # C:\ProgramData
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "PROGRAMW6432",
+    "APPDATA",          # %USERPROFILE%\AppData\Roaming — Python uses it
+    "LOCALAPPDATA",     # %USERPROFILE%\AppData\Local
+    "USERPROFILE",      # C:\Users\<name> — Python's expanduser uses it
+    "USERDOMAIN",
+    "USERNAME",
+    "HOMEDRIVE",        # C:
+    "HOMEPATH",         # \Users\<name>
+    "COMPUTERNAME",
+})
+
+
+def _scrub_child_env(source_env, is_passthrough=None, is_windows=None):
+    """Produce the scrubbed child-process env for execute_code.
+
+    Rules (order matters):
+      1. Passthrough vars (skill- or config-declared) always pass.
+      2. Secret-substring names (KEY/TOKEN/etc.) are blocked.
+      3. Names matching a safe prefix pass.
+      4. On Windows, a small OS-essential allowlist passes by exact name
+         — without these the child can't even create a socket or spawn a
+         subprocess.
+
+    Extracted into a helper so tests can exercise the logic without
+    spawning a subprocess.
+    """
+    if is_passthrough is None:
+        try:
+            from tools.env_passthrough import is_env_passthrough as _ep
+        except Exception:
+            _ep = lambda _: False  # noqa: E731
+        is_passthrough = _ep
+    if is_windows is None:
+        is_windows = _IS_WINDOWS
+
+    scrubbed = {}
+    for k, v in source_env.items():
+        if is_passthrough(k):
+            scrubbed[k] = v
+            continue
+        if any(s in k.upper() for s in _SECRET_SUBSTRINGS):
+            continue
+        if any(k.startswith(p) for p in _SAFE_ENV_PREFIXES):
+            scrubbed[k] = v
+            continue
+        if is_windows and k.upper() in _WINDOWS_ESSENTIAL_ENV_VARS:
+            scrubbed[k] = v
+    return scrubbed
+
 
 def check_sandbox_requirements() -> bool:
-    """Code execution sandbox requires local sockets or a remote backend."""
+    """Code execution sandbox requires a POSIX OS for Unix domain sockets."""
+    if not SANDBOX_AVAILABLE:
+        return False
+
     try:
         from tools.terminal_tool import (
             _check_vercel_sandbox_requirements,
@@ -152,8 +236,8 @@ def generate_hermes_tools_module(enabled_tools: List[str],
 
     Args:
         enabled_tools: Tool names enabled in the current session.
-        transport: ``"uds"`` for Unix domain socket, ``"tcp"`` for Windows
-                   loopback sockets, or ``"file"`` for remote backends.
+        transport: ``"uds"`` for Unix domain socket (local backend) or
+                   ``"file"`` for file-based RPC (remote backends).
     """
     tools_to_generate = sorted(SANDBOX_ALLOWED_TOOLS & set(enabled_tools))
 
@@ -172,8 +256,6 @@ def generate_hermes_tools_module(enabled_tools: List[str],
 
     if transport == "file":
         header = _FILE_TRANSPORT_HEADER
-    elif transport == "tcp":
-        header = _TCP_TRANSPORT_HEADER
     else:
         header = _UDS_TRANSPORT_HEADER
 
@@ -235,54 +317,27 @@ _call_lock = threading.Lock()
 ''' + _COMMON_HELPERS + '''\
 
 def _connect():
+    """Connect to the parent's RPC server via the transport it picked.
+
+    HERMES_RPC_SOCKET can be either:
+      - a filesystem path (POSIX Unix domain socket — the default on
+        Linux and macOS)
+      - a string of the form ``tcp://127.0.0.1:<port>`` (Windows, where
+        AF_UNIX is unreliable — the parent falls back to loopback TCP)
+    """
     global _sock
     if _sock is None:
-        _sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        _sock.connect(os.environ["HERMES_RPC_SOCKET"])
-        _sock.settimeout(300)
-    return _sock
-
-def _call(tool_name, args):
-    """Send a tool call to the parent process and return the parsed result."""
-    request = json.dumps({"tool": tool_name, "args": args}) + "\\n"
-    with _call_lock:
-        conn = _connect()
-        conn.sendall(request.encode())
-        buf = b""
-        while True:
-            chunk = conn.recv(65536)
-            if not chunk:
-                raise RuntimeError("Agent process disconnected")
-            buf += chunk
-            if buf.endswith(b"\\n"):
-                break
-    raw = buf.decode().strip()
-    result = json.loads(raw)
-    if isinstance(result, str):
-        try:
-            return json.loads(result)
-        except (json.JSONDecodeError, TypeError):
-            return result
-    return result
-
-'''
-
-# ---- TCP transport (native Windows local backend) ------------------------
-
-_TCP_TRANSPORT_HEADER = '''\
-"""Auto-generated Hermes tools RPC stubs."""
-import json, os, socket, shlex, threading, time
-
-_sock = None
-_call_lock = threading.Lock()
-''' + _COMMON_HELPERS + '''\
-
-def _connect():
-    global _sock
-    if _sock is None:
-        host = os.environ["HERMES_RPC_HOST"]
-        port = int(os.environ["HERMES_RPC_PORT"])
-        _sock = socket.create_connection((host, port), timeout=300)
+        endpoint = os.environ["HERMES_RPC_SOCKET"]
+        if endpoint.startswith("tcp://"):
+            # tcp://host:port  (host is always 127.0.0.1 in practice — we
+            # only bind loopback server-side)
+            _host_port = endpoint[len("tcp://"):]
+            _host, _, _port = _host_port.rpartition(":")
+            _sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            _sock.connect((_host or "127.0.0.1", int(_port)))
+        else:
+            _sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            _sock.connect(endpoint)
         _sock.settimeout(300)
     return _sock
 
@@ -335,9 +390,12 @@ def _call(tool_name, args):
     req_file = os.path.join(_RPC_DIR, f"req_{seq_str}")
     res_file = os.path.join(_RPC_DIR, f"res_{seq_str}")
 
-    # Write request atomically (write to .tmp, then rename)
+    # Write request atomically (write to .tmp, then rename).
+    # encoding="utf-8" is critical: on Windows-hosted remote backends
+    # (or any non-UTF-8 locale) the default open() mode would mangle
+    # non-ASCII chars in tool args when encoding them as JSON.
     tmp = req_file + ".tmp"
-    with open(tmp, "w") as f:
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump({"tool": tool_name, "args": args, "seq": seq}, f)
     os.rename(tmp, req_file)
 
@@ -350,7 +408,7 @@ def _call(tool_name, args):
         time.sleep(poll_interval)
         poll_interval = min(poll_interval * 1.2, 0.25)  # Back off to 250ms
 
-    with open(res_file) as f:
+    with open(res_file, encoding="utf-8") as f:
         raw = f.read()
 
     # Clean up response file
@@ -459,7 +517,7 @@ def _rpc_server_loop(
                 # their status prints don't leak into the CLI spinner.
                 try:
                     _real_stdout, _real_stderr = sys.stdout, sys.stderr
-                    devnull = open(os.devnull, "w")
+                    devnull = open(os.devnull, "w", encoding="utf-8")
                     try:
                         sys.stdout = devnull
                         sys.stderr = devnull
@@ -733,7 +791,7 @@ def _rpc_poll_loop(
                     # Dispatch through the standard tool handler
                     try:
                         _real_stdout, _real_stderr = sys.stdout, sys.stderr
-                        devnull = open(os.devnull, "w")
+                        devnull = open(os.devnull, "w", encoding="utf-8")
                         try:
                             sys.stdout = devnull
                             sys.stderr = devnull
@@ -996,6 +1054,12 @@ def execute_code(
     Returns:
         JSON string with execution results.
     """
+    if not SANDBOX_AVAILABLE:
+        return json.dumps({
+            "error": "execute_code sandbox is unavailable in this environment. "
+                     "Use normal tool calls (terminal, read_file, write_file, ...) instead."
+        })
+
     if not code or not code.strip():
         return tool_error("No code provided.")
 
@@ -1005,7 +1069,7 @@ def execute_code(
     if env_type != "local":
         return _execute_remote(code, task_id, enabled_tools)
 
-    # --- Local execution path ---
+    # --- Local execution path (UDS) --- below this line is unchanged ---
 
     # Import per-thread interrupt check (cooperative cancellation)
     from tools.interrupt import is_interrupted as _is_interrupted
@@ -1024,12 +1088,25 @@ def execute_code(
 
     # --- Set up temp directory with hermes_tools.py and script.py ---
     tmpdir = tempfile.mkdtemp(prefix="hermes_sandbox_")
-    transport = "tcp" if _IS_WINDOWS else "uds"
     # Use /tmp on macOS to avoid the long /var/folders/... path that pushes
     # Unix domain socket paths past the 104-byte macOS AF_UNIX limit.
     # On Linux, tempfile.gettempdir() already returns /tmp.
+    #
+    # Windows: Python 3.9+ added partial AF_UNIX support but the file-backed
+    # variant is flaky across Windows builds (requires Windows 10 1803+,
+    # still fails under some configurations, and the socket file can't live
+    # on the same temp drive as the script).  Fall back to loopback TCP —
+    # same ephemeral port, same 1-connection listen queue, same serialized
+    # request/response framing.  The generated client reads the transport
+    # selector from HERMES_RPC_SOCKET (path vs. ``tcp://host:port``).
     _sock_tmpdir = "/tmp" if sys.platform == "darwin" else tempfile.gettempdir()
-    sock_path = None if transport == "tcp" else os.path.join(_sock_tmpdir, f"hermes_rpc_{uuid.uuid4().hex}.sock")
+    _use_tcp_rpc = _IS_WINDOWS
+    if _use_tcp_rpc:
+        sock_path = None  # not used on Windows; TCP endpoint stored below
+        rpc_endpoint = None  # set after bind()
+    else:
+        sock_path = os.path.join(_sock_tmpdir, f"hermes_rpc_{uuid.uuid4().hex}.sock")
+        rpc_endpoint = sock_path
 
     tool_call_log: list = []
     tool_call_counter = [0]  # mutable so the RPC thread can increment
@@ -1037,27 +1114,42 @@ def execute_code(
     server_sock = None
 
     try:
-        # Write the auto-generated hermes_tools module
+        # Write the auto-generated hermes_tools module.
+        # encoding="utf-8" is required on Windows — the stub and user code
+        # both contain non-ASCII characters (em-dashes in docstrings, plus
+        # whatever the user script carries).  Python's default open() uses
+        # the system locale on Windows (cp1252 typically), which corrupts
+        # those bytes; the child then fails to import with a SyntaxError
+        # ("'utf-8' codec can't decode byte 0x97 in position ...") because
+        # Python source files are decoded as UTF-8 by default (PEP 3120).
         # sandbox_tools is already the correct set (intersection with session
         # tools, or SANDBOX_ALLOWED_TOOLS as fallback — see lines above).
-        tools_src = generate_hermes_tools_module(list(sandbox_tools), transport=transport)
-        with open(os.path.join(tmpdir, "hermes_tools.py"), "w") as f:
+        tools_src = generate_hermes_tools_module(list(sandbox_tools))
+        with open(os.path.join(tmpdir, "hermes_tools.py"), "w", encoding="utf-8") as f:
             f.write(tools_src)
 
         # Write the user's script
-        with open(os.path.join(tmpdir, "script.py"), "w") as f:
+        with open(os.path.join(tmpdir, "script.py"), "w", encoding="utf-8") as f:
             f.write(code)
 
-        # --- Start local RPC server ---
-        if transport == "tcp":
+        # --- Start RPC server ---
+        # Two transports:
+        #   POSIX: AF_UNIX stream socket on sock_path, chmod 0600 for
+        #   owner-only access.  Filesystem permissions gate the socket.
+        #   Windows: AF_INET stream socket on 127.0.0.1 with an ephemeral
+        #   port.  No filesystem permission story, but loopback-only bind
+        #   means only the current user's processes (not remote) can
+        #   connect.  HERMES_RPC_SOCKET is set to ``tcp://127.0.0.1:<port>``
+        #   which the generated client parses to pick AF_INET.
+        if _use_tcp_rpc:
             server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            server_sock.bind(("127.0.0.1", 0))
-            rpc_host, rpc_port = server_sock.getsockname()
+            server_sock.bind(("127.0.0.1", 0))  # ephemeral port
+            _host, _port = server_sock.getsockname()[:2]
+            rpc_endpoint = f"tcp://{_host}:{_port}"
         else:
             server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             server_sock.bind(sock_path)
             os.chmod(sock_path, 0o600)
-            rpc_host, rpc_port = None, None
         server_sock.listen(1)
 
         rpc_thread = threading.Thread(
@@ -1076,36 +1168,32 @@ def execute_code(
         # generated scripts. The child accesses tools via RPC, not direct API.
         # Exception: env vars declared by loaded skills (via env_passthrough
         # registry) or explicitly allowed by the user in config.yaml
-        # (terminal.env_passthrough) are passed through.
-        _SAFE_ENV_PREFIXES = ("PATH", "HOME", "USER", "LANG", "LC_", "TERM",
-                              "TMPDIR", "TMP", "TEMP", "SHELL", "LOGNAME",
-                              "XDG_", "PYTHONPATH", "VIRTUAL_ENV", "CONDA",
-                              "SYSTEMROOT", "WINDIR", "COMSPEC",
-                              "HERMES_")
-        _SECRET_SUBSTRINGS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL",
-                              "PASSWD", "AUTH")
-        try:
-            from tools.env_passthrough import is_env_passthrough as _is_passthrough
-        except Exception:
-            _is_passthrough = lambda _: False  # noqa: E731
-        child_env = {}
-        for k, v in os.environ.items():
-            # Passthrough vars (skill-declared or user-configured) always pass.
-            if _is_passthrough(k):
-                child_env[k] = v
-                continue
-            # Block vars with secret-like names.
-            if any(s in k.upper() for s in _SECRET_SUBSTRINGS):
-                continue
-            # Allow vars with known safe prefixes.
-            if any(k.startswith(p) for p in _SAFE_ENV_PREFIXES):
-                child_env[k] = v
-        if transport == "tcp":
-            child_env["HERMES_RPC_HOST"] = str(rpc_host)
-            child_env["HERMES_RPC_PORT"] = str(rpc_port)
-        else:
-            child_env["HERMES_RPC_SOCKET"] = sock_path
+        # (terminal.env_passthrough) are passed through.  On Windows, a small
+        # OS-essential allowlist (SYSTEMROOT, WINDIR, COMSPEC, ...) is also
+        # passed through — without those, the child can't create a socket
+        # or spawn a subprocess.  See ``_scrub_child_env`` for the rules.
+        child_env = _scrub_child_env(os.environ)
+        child_env["HERMES_RPC_SOCKET"] = rpc_endpoint
         child_env["PYTHONDONTWRITEBYTECODE"] = "1"
+        # Force UTF-8 for the child's stdio and default file encoding.
+        #
+        # Without this, on Windows sys.stdout is bound to the console code
+        # page (cp1252 on US-locale installs), and any script that does
+        # ``print("café")`` or ``print("→")`` crashes with:
+        #
+        #   UnicodeEncodeError: 'charmap' codec can't encode character
+        #   '\u2192' in position N: character maps to <undefined>
+        #
+        # PYTHONIOENCODING fixes sys.stdin/stdout/stderr.
+        # PYTHONUTF8=1 enables "UTF-8 mode" (PEP 540) which additionally
+        # makes ``open()``'s default encoding UTF-8, so user scripts that
+        # write files without specifying encoding= also work correctly.
+        #
+        # On POSIX both values usually match the locale default already,
+        # so setting them is harmless belt-and-suspenders for environments
+        # with a C/POSIX locale (containers, minimal base images).
+        child_env["PYTHONIOENCODING"] = "utf-8"
+        child_env["PYTHONUTF8"] = "1"
         # Ensure the hermes-agent root is importable in the sandbox so
         # repo-root modules are available to child scripts.  We also prepend
         # the staging tmpdir so ``from hermes_tools import ...`` resolves even
@@ -1352,22 +1440,34 @@ def execute_code(
                 logger.debug("Server socket close error: %s", e)
         import shutil
         shutil.rmtree(tmpdir, ignore_errors=True)
-        if sock_path:
-            try:
+        try:
+            # Only UDS has a filesystem socket to unlink; TCP sockets are
+            # freed by server_sock.close() above.
+            if sock_path:
                 os.unlink(sock_path)
-            except OSError:
-                pass  # already cleaned up or never created
+        except OSError:
+            pass  # already cleaned up or never created
 
 
 def _kill_process_group(proc, escalate: bool = False):
-    """Kill the child and its entire process group."""
+    """Kill the child and its entire process tree (cross-platform via psutil)."""
+    import psutil
     try:
-        if _IS_WINDOWS:
-            proc.terminate()
-        else:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-    except (ProcessLookupError, PermissionError) as e:
-        logger.debug("Could not kill process group: %s", e, exc_info=True)
+        parent = psutil.Process(proc.pid)
+        children = parent.children(recursive=True)
+        for child in children:
+            try:
+                child.terminate()
+            except psutil.NoSuchProcess:
+                pass
+        try:
+            parent.terminate()
+        except psutil.NoSuchProcess:
+            pass
+    except psutil.NoSuchProcess:
+        pass
+    except (PermissionError, OSError) as e:
+        logger.debug("Could not terminate process tree: %s", e, exc_info=True)
         try:
             proc.kill()
         except Exception as e2:
@@ -1379,12 +1479,20 @@ def _kill_process_group(proc, escalate: bool = False):
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             try:
-                if _IS_WINDOWS:
-                    proc.kill()
-                else:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError) as e:
-                logger.debug("Could not kill process group with SIGKILL: %s", e, exc_info=True)
+                parent = psutil.Process(proc.pid)
+                for child in parent.children(recursive=True):
+                    try:
+                        child.kill()
+                    except psutil.NoSuchProcess:
+                        pass
+                try:
+                    parent.kill()
+                except psutil.NoSuchProcess:
+                    pass
+            except psutil.NoSuchProcess:
+                pass
+            except (PermissionError, OSError) as e:
+                logger.debug("Could not kill process tree: %s", e, exc_info=True)
                 try:
                     proc.kill()
                 except Exception as e2:
