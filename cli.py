@@ -63,8 +63,79 @@ from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.widgets import TextArea
 from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit import print_formatted_text as _pt_print
+from prompt_toolkit import print_formatted_text as _pt_print_raw
 from prompt_toolkit.formatted_text import ANSI as _PT_ANSI
+
+
+# ---------------------------------------------------------------------------
+# Windows MSYS/Git Bash / redirected stdout fix.
+#
+# When prompt_toolkit creates an Application on Windows, it constructs a
+# Win32Output for stdout. Win32Output calls GetConsoleScreenBufferInfo on
+# the stdout handle at __init__ time. If stdout is not a real Windows
+# console (Git Bash uses MSYS PTY, MSYS pipes, redirected stdout, etc.),
+# the Win32 call fails and Win32Output raises NoConsoleScreenBufferError.
+# That kills the entire Application before render. Vt100_Output is the
+# correct fallback for these environments — it just writes ANSI escapes
+# the way Bash/MSYS terminals understand. Fixes issue #22445.
+# ---------------------------------------------------------------------------
+def _install_pt_output_fallback():
+    import sys as _sys
+    if _sys.platform != "win32":
+        return
+    try:
+        import prompt_toolkit.output.defaults as _pt_defaults
+        from prompt_toolkit.output.win32 import NoConsoleScreenBufferError
+        from prompt_toolkit.output.vt100 import Vt100_Output
+        from prompt_toolkit.output.color_depth import ColorDepth
+    except Exception:
+        return
+    _orig_create_output = _pt_defaults.create_output
+
+    def _create_output_safe(stdout=None, always_prefer_tty: bool = False):
+        try:
+            return _orig_create_output(stdout=stdout, always_prefer_tty=always_prefer_tty)
+        except NoConsoleScreenBufferError:
+            target = stdout if stdout is not None else _sys.stdout
+            return Vt100_Output.from_pty(target, term="xterm-256color")
+
+    _pt_defaults.create_output = _create_output_safe
+
+_install_pt_output_fallback()
+
+
+def _pt_print(*args, **kwargs):
+    """prompt_toolkit print wrapper that survives NoConsoleScreenBufferError.
+
+    On Windows, prompt_toolkit's Win32Output raises NoConsoleScreenBufferError
+    when stdout is not a real Windows console (MSYS/Git Bash, redirected
+    pipe, cmd-piped process). Fall back to plain sys.stdout in that case
+    so we don't crash. The visible text loses ANSI colors but the program
+    keeps running. Fixes issue #22445 (Kanban worker), #25556 (cprint).
+    """
+    import sys as _sys
+    try:
+        _pt_print_raw(*args, **kwargs)
+    except Exception as exc:
+        cls_name = type(exc).__name__
+        if cls_name == "NoConsoleScreenBufferError" or "NoConsoleScreenBufferError" in str(exc):
+            text_parts = []
+            for arg in args:
+                try:
+                    if hasattr(arg, "value"):
+                        text_parts.append(str(arg.value))
+                    else:
+                        text_parts.append(str(arg))
+                except Exception:
+                    pass
+            import re as _re
+            plain = _re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", "".join(text_parts))
+            try:
+                print(plain, file=_sys.stderr, flush=True)
+            except Exception:
+                pass
+            return
+        raise
 try:
     from prompt_toolkit.cursor_shapes import CursorShape
     _STEADY_CURSOR = CursorShape.BLOCK  # Non-blinking block cursor

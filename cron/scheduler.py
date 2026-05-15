@@ -770,7 +770,11 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
                 "On Windows, install Git for Windows (which ships Git Bash) "
                 "or rewrite the script as Python (.py)."
             )
-        argv = [_bash, str(path)]
+        # Pass forward-slash path to bash so backslashes aren't interpreted
+        # as escape characters (issue #23404). bash on Windows handles both
+        # /c/Users/... and C:/Users/... but not C:\Users\...
+        script_arg = str(path).replace("\\", "/")
+        argv = [_bash, script_arg]
     else:
         argv = [sys.executable, str(path)]
 
@@ -781,6 +785,8 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
             text=True,
             timeout=script_timeout,
             cwd=str(path.parent),
+            encoding="utf-8",
+            errors="replace",
         )
         stdout = (result.stdout or "").strip()
         stderr = (result.stderr or "").strip()

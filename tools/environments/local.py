@@ -18,6 +18,23 @@ _IS_WINDOWS = platform.system() == "Windows"
 logger = logging.getLogger(__name__)
 
 
+def _git_bash_to_windows(path: str) -> str:
+    """Convert Git Bash-style ``/c/Users/...`` paths to native ``C:\\Users\\...``.
+
+    No-op on POSIX or for paths that are already in Windows form. Fixes
+    issue #23862: ``os.path.isdir`` returns False for Git Bash paths on
+    native Windows Python, so `_resolve_safe_cwd` would treat the cwd as
+    missing and fall back to `/`, breaking every subsequent terminal call.
+    """
+    if not _IS_WINDOWS or not path:
+        return path
+    m = re.match(r'^/([a-zA-Z])/(.*)$', path)
+    if m:
+        drive, rest = m.group(1), m.group(2)
+        return f"{drive.upper()}:\\{rest.replace('/', os.sep)}"
+    return path
+
+
 def _resolve_safe_cwd(cwd: str) -> str:
     """Return ``cwd`` if it exists as a directory, else the nearest existing
     ancestor.  Falls back to ``tempfile.gettempdir()`` only if walking up the
@@ -30,11 +47,15 @@ def _resolve_safe_cwd(cwd: str) -> str:
     raises ``FileNotFoundError`` before bash starts, wedging every subsequent
     terminal call until the gateway restarts.
     """
-    if cwd and os.path.isdir(cwd):
-        return cwd
+    # On Windows, Git Bash returns paths like /d/foo which os.path.isdir
+    # cannot resolve. Normalize before existence check (issue #23862).
+    check_path = _git_bash_to_windows(cwd) if cwd else cwd
+    if check_path and os.path.isdir(check_path):
+        return cwd  # return original form — caller handles native conversion
     parent = os.path.dirname(cwd) if cwd else ""
     while parent:
-        if os.path.isdir(parent):
+        check_parent = _git_bash_to_windows(parent)
+        if os.path.isdir(check_parent):
             return parent
         next_parent = os.path.dirname(parent)
         if next_parent == parent:

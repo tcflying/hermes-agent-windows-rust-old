@@ -106,11 +106,24 @@ def _exec_schtasks(args: list[str]) -> tuple[int, str, str]:
     if schtasks is None:
         return (1, "", "schtasks.exe not found on PATH")
     try:
+        # schtasks emits output in the system ANSI code page (cp936 on
+        # zh-CN, cp1252 on en-US, etc.), NOT UTF-8. Without explicit
+        # encoding, locale-dependent default decoding can raise
+        # UnicodeDecodeError on non-ASCII task names (#24417, #24478).
+        # Use OS-native ANSI code page via mbcs codec — falls back to
+        # locale.getpreferredencoding() if mbcs unavailable.
+        try:
+            import locale
+            _ansi_codec = "mbcs" if sys.platform == "win32" else locale.getpreferredencoding(False)
+        except Exception:
+            _ansi_codec = "utf-8"
         proc = subprocess.run(
             [schtasks, *args],
             capture_output=True,
             text=True,
             timeout=_SCHTASKS_TIMEOUT_S,
+            encoding=_ansi_codec,
+            errors="replace",
             # CREATE_NO_WINDOW avoids a flashing console window when the CLI
             # is itself hosted in a TUI. See tools/browser_tool.py for the
             # same pattern and the windows-subprocess-sigint-storm.md ref.

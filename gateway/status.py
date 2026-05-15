@@ -115,6 +115,12 @@ def _get_process_start_time(pid: int) -> Optional[int]:
         # Field 22 in /proc/<pid>/stat is process start time (clock ticks).
         return int(stat_path.read_text(encoding="utf-8").split()[21])
     except (FileNotFoundError, IndexError, PermissionError, ValueError, OSError):
+        pass
+    # Windows/macOS fallback: psutil exposes create_time() cross-platform.
+    try:
+        import psutil  # type: ignore
+        return int(psutil.Process(pid).create_time())
+    except Exception:
         return None
 
 

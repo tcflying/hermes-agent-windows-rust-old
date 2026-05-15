@@ -1053,7 +1053,9 @@ def run_doctor(args):
                     ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", ssh_host, "echo ok"],
                     capture_output=True,
                     text=True,
-                    timeout=15
+                    timeout=15,
+                    encoding="utf-8",
+                    errors="replace",
                 )
             except subprocess.TimeoutExpired:
                 result = None
@@ -1221,6 +1223,8 @@ def run_doctor(args):
                     [_npm_bin, "audit", "--json"],
                     cwd=str(npm_dir),
                     capture_output=True, text=True, timeout=30,
+                    encoding="utf-8",
+                    errors="replace",
                 )
                 import json as _json
                 audit_data = _json.loads(audit_result.stdout) if audit_result.stdout.strip() else {}

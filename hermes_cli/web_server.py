@@ -3132,20 +3132,22 @@ async def get_models_analytics(days: int = 30):
 import re
 import asyncio
 
-# PTY bridge is POSIX-only (depends on fcntl/termios/ptyprocess).  On native
-# Windows the import raises; catch and leave PtyBridge=None so the rest of
-# the dashboard (sessions, jobs, metrics, config editor) still loads and the
-# /api/pty endpoint cleanly refuses with a WSL-suggested message.
+# PTY bridge: try POSIX ptyprocess first, then Windows ConPTY via pywinpty.
+# If both fail, the dashboard still loads — only the /chat tab is disabled.
 try:
     from hermes_cli.pty_bridge import PtyBridge, PtyUnavailableError
     _PTY_BRIDGE_AVAILABLE = True
-except ImportError as _pty_import_err:  # pragma: no cover - Windows-only path
-    PtyBridge = None  # type: ignore[assignment]
-    _PTY_BRIDGE_AVAILABLE = False
+except ImportError:
+    try:
+        from hermes_cli.conpty_bridge import PtyBridge, PtyUnavailableError  # type: ignore[assignment]
+        _PTY_BRIDGE_AVAILABLE = True
+    except ImportError:
+        PtyBridge = None  # type: ignore[assignment]
+        _PTY_BRIDGE_AVAILABLE = False
 
-    class PtyUnavailableError(RuntimeError):  # type: ignore[no-redef]
-        """Stub on platforms where pty_bridge can't be imported."""
-        pass
+        class PtyUnavailableError(RuntimeError):  # type: ignore[no-redef]
+            """Stub on platforms where neither pty_bridge nor conpty_bridge is available."""
+            pass
 
 _RESIZE_RE = re.compile(rb"\x1b\[RESIZE:(\d+);(\d+)\]")
 _PTY_READ_CHUNK_TIMEOUT = 0.2
@@ -3279,14 +3281,12 @@ async def pty_ws(ws: WebSocket) -> None:
 
     await ws.accept()
 
-    # On native Windows, the POSIX PTY bridge can't be imported.  Tell the
-    # client and close cleanly rather than pretending the feature works.
+    # Neither POSIX pty_bridge nor Windows conpty_bridge could be imported.
     if not _PTY_BRIDGE_AVAILABLE:
         await ws.send_text(
-            "\r\n\x1b[31mChat unavailable: the embedded terminal requires a "
-            "POSIX PTY, which native Windows Python doesn't provide.\x1b[0m\r\n"
-            "\x1b[33mInstall Hermes inside WSL2 to use the dashboard's /chat "
-            "tab — the rest of the dashboard works here.\x1b[0m\r\n"
+            "\r\n\x1b[31mChat unavailable: no PTY backend found.\x1b[0m\r\n"
+            "\x1b[33mInstall pywinpty (pip install pywinpty) on Windows, "
+            "or ptyprocess on POSIX.\x1b[0m\r\n"
         )
         await ws.close(code=1011)
         return

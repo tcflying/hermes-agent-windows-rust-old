@@ -17,6 +17,7 @@ the async helper, never in the synchronous probe.
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import signal
@@ -224,7 +225,30 @@ def spawn_async_diagnostic(
     # available on every POSIX target we support; on Windows we just skip
     # the snapshot (the platform doesn't ship ps anyway).
     if sys.platform == "win32":
-        return None
+        try:
+            import psutil  # type: ignore
+            lines = [
+                f"=== shutdown diagnostic @ {signal_name} ===",
+                f"--- date ---",
+                datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "--- top 30 processes by cpu ---",
+            ]
+            for p in sorted(
+                psutil.process_iter(["pid", "name", "cpu_percent", "memory_info", "cmdline"]),
+                key=lambda x: x.info.get("cpu_percent") or 0,
+                reverse=True,
+            )[:30]:
+                info = p.info
+                mem_mb = (info.get("memory_info") or type("", (), {"rss": 0})()).rss / (1024 * 1024)
+                cmd = " ".join(info.get("cmdline") or []) or info.get("name", "?")
+                lines.append(f"  {info['pid']:>7}  {info.get('cpu_percent', 0):5.1f}%  {mem_mb:7.1f}MB  {cmd[:120]}")
+            lines.append("=== end ===\n")
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write("\n".join(lines))
+            return None  # synchronous on Windows — no subprocess PID to return
+        except Exception:
+            return None
 
     script = (
         f"echo '=== shutdown diagnostic @ {signal_name} ==='; "
